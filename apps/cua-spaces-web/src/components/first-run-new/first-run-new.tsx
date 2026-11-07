@@ -24,7 +24,7 @@ import { extraName, spokenName } from "@/bridge/space-names";
 import { AddComputerSheet } from "@/components/add-computer-sheet";
 import { AppPermissionList, type PermissionsView } from "@/components/app-permissions";
 import { AppMarkImage } from "@/components/agents/harness-mark";
-import { agoLabel, useRecentThreads } from "@/components/ask-first/pick-up";
+import { agoLabel, PICK_UP_LIMIT, recentThreads, useRecentThreads } from "@/components/ask-first/pick-up";
 import { CuaLogo } from "@/components/cua-logo";
 import { Switch } from "@/components/ui/switch";
 import { permissionsStepView, type PermissionsStepView } from "@/lib/app-permissions";
@@ -33,6 +33,7 @@ import {
   afterWhere,
   agentView,
   chosenAgent,
+  CODING_AGENTS,
   dotStep,
   INSTALL_PAGES,
   NEW_RUN_EMPTY,
@@ -526,19 +527,32 @@ export function AgentScreen({ view, onPick, onContinue, onInstall, busy }: { vie
 /**
  * "Pick up where you left off" (CUA-3319): 2 to 4 of the person's recent chats with their agents on
  * this computer, each with **Continue in Cua**, which opens it in a new Home task with what was said
- * so far. Nothing runs until they send. Hidden when there are none. Only each chat's title, folder
- * and time are read here; its messages are read when it is picked.
+ * so far. Nothing runs until they send. Only the chats of `agents` (the agent picked in setup) are
+ * listed; all three agents' when none are named. While they are read, two quiet grey rows hold the
+ * place; hidden when there are none. Only each chat's title, folder and time are read here; its
+ * messages are read when it is picked.
  */
-export function PickUpWhereYouLeftOff({ onContinue, place = thisComputerText(), className }: { onContinue: (task: AskTask) => void; place?: string; className?: string }) {
-  const threads = useRecentThreads();
-  if (!threads?.length) return null;
+export function PickUpWhereYouLeftOff({ onContinue, agents, place = thisComputerText(), className }: { onContinue: (task: AskTask) => void; agents?: readonly string[]; place?: string; className?: string }) {
+  const threads = useRecentThreads(PICK_UP_LIMIT, agents);
+  if (threads && !threads.length) return null;
   return (
-    <section aria-labelledby="pick-up-heading" className={cn("w-full", className)} data-pick-up="">
+    <section aria-labelledby="pick-up-heading" aria-busy={threads ? undefined : true} className={cn("w-full", className)} data-pick-up="" data-pick-up-loading={threads ? undefined : ""}>
       <h2 id="pick-up-heading" className="text-[15px] font-semibold text-white">
         Pick up where you left off
       </h2>
       <ul className={cn(CARD, "mt-2.5 max-w-[600px]")}>
-        {threads.map((t) => {
+        {threads === null
+          ? [0, 1].map((i) => (
+              <li key={i} aria-hidden className="flex items-center gap-3 px-3 py-2.5" data-pick-up-placeholder="">
+                <span className="size-7 shrink-0 rounded-full bg-white/[0.06]" />
+                <span className="min-w-0 flex-1 space-y-1.5 py-0.5">
+                  <span className="block h-3.5 w-[55%] rounded-full bg-white/[0.08]" />
+                  <span className="block h-3 w-[35%] rounded-full bg-white/[0.05]" />
+                </span>
+              </li>
+            ))
+          : null}
+        {(threads ?? []).map((t) => {
           const folder = folderLabel(t.cwd);
           const when = agoLabel(t.lastActiveMs);
           return (
@@ -585,8 +599,8 @@ export function ReadyScreen({ view, agent, onDone, onContinueChat, place }: { vi
           {copied ? "Copied" : view.copy}
         </button>
       </div>
-      {/* The person's own recent chats on this computer (CUA-3319), hidden when there are none. */}
-      {onContinueChat ? <PickUpWhereYouLeftOff className="mt-[min(28px,3vh)]" place={place} onContinue={onContinueChat} /> : null}
+      {/* The person's own recent chats with the agent they picked (CUA-3319), hidden when there are none. */}
+      {onContinueChat ? <PickUpWhereYouLeftOff className="mt-[min(28px,3vh)]" agents={[agent]} place={place} onContinue={onContinueChat} /> : null}
       <Actions>
         <button type="button" className={WHITE_BUTTON} onClick={onDone} data-onboarding-primary="">
           {view.done}
@@ -879,19 +893,37 @@ export function NewFirstRun() {
     if (!agent || !adapter || connecting) return;
     setConnecting(true);
     setConnectError(null);
+    // Ready's "Pick up where you left off": the picked agent's chats are read while Cua connects, so the list is
+    // there when the screen shows (CUA-3319).
+    void recentThreads(adapter, [agent], PICK_UP_LIMIT);
+    const started = performance.now();
     try {
-      // The same connect as Settings and the old first run: Cua's tools in the agent's settings, and its sign-in kept.
-      const viaConnect = await adapter.call("agents.connect", { agents: [agent], signIn: true }).then(
-        () => true,
-        () => false,
-      );
-      const rows = viaConnect ? await adapter.call("agents.setup", {}) : await adapter.call("agents.configure", { agents: [agent] });
-      const row = rows.find((r) => r.agent === agent);
-      if (!row?.configured) {
-        setConnectError(`Cua couldn't add itself to ${row?.name ?? "the agent"}'s settings.${row?.detail ? ` ${row.detail}` : ""}`);
+      // Only Cua's tools in the agent's settings wait here: they are all the Ready screen needs, and take well under a
+      // second. Copying the agent's sign-in can run Claude Code to refresh a sign-in that ran out (seconds, up to 30),
+      // so it runs after, below.
+      const results = await adapter.call("agents.connect", { agents: [agent], signIn: false }).catch(() => null);
+      const result = results?.find((r) => r.agent === agent);
+      let failed: string | null = null;
+      if (result) {
+        if (!result.tools_ok) failed = result.tools_line ?? "";
+      } else {
+        // A host without Connect, or an answer without this agent: the agent's row says.
+        const rows = results ? await adapter.call("agents.setup", {}) : await adapter.call("agents.configure", { agents: [agent] });
+        const row = rows.find((r) => r.agent === agent);
+        if (!row?.configured) failed = row?.detail ?? "";
+      }
+      if (failed !== null) {
+        const name = CODING_AGENTS.find((a) => a.id === agent)?.name ?? "the agent";
+        setConnectError(`Cua couldn't add itself to ${name}'s settings.${failed ? ` ${failed}` : ""}`);
         return;
       }
+      console.info(`first run: ${agent} connected in ${Math.round(performance.now() - started)} ms`);
       save({ agent, screen: "ready" });
+      // The same connect as Settings, now with the sign-in kept for runs in your Spaces. Nothing on Ready waits on it.
+      void adapter.call("agents.connect", { agents: [agent], signIn: true }).then(
+        () => console.info(`first run: ${agent}'s sign-in kept in ${Math.round(performance.now() - started)} ms`),
+        (e: unknown) => console.warn("first run: keeping the sign-in failed", e),
+      );
     } catch (e) {
       setConnectError(e instanceof Error ? e.message : String(e));
     } finally {
