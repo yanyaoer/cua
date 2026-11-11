@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compute this fork's next prerelease tag for a Cua Driver version.
 #
-#   next_prerelease_tag.sh --version 0.46.1 --remote-url https://github.com/yanyaoer/cua
+#   next_prerelease_tag.sh --version 0.46.1 --remote-url https://github.com/<owner>/cua
 #
 # The fork publishes one prerelease per weekly build, tagged
 #

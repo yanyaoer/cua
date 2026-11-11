@@ -20,6 +20,7 @@ ARCH=""
 TARGET=""
 OUT_DIR=""
 RUST_DIR=""
+SMOKE=0
 
 usage() {
     cat <<'EOF'
@@ -30,6 +31,7 @@ usage: pack_linux_artifact.sh --version X.Y.Z --arch ARCH --target TRIPLE [optio
   --target TRIPLE   Cargo target triple whose release/ output is packaged (required).
   --rust-dir DIR    libs/cua-driver/rust (default: the checkout containing this script).
   --out-dir DIR     Where assets are written (default: <rust-dir>/release/dist).
+  --smoke           Afterwards, unpack the full archive and run `cua-driver --version`.
 EOF
 }
 
@@ -40,6 +42,7 @@ while [[ $# -gt 0 ]]; do
         --target) TARGET="$2"; shift 2 ;;
         --rust-dir) RUST_DIR="$2"; shift 2 ;;
         --out-dir) OUT_DIR="$2"; shift 2 ;;
+        --smoke) SMOKE=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -51,7 +54,8 @@ if [[ -z $VERSION || -z $ARCH || -z $TARGET ]]; then
 fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_ROOT="$(cd "$HERE/../../../.." && pwd)"
+# This script lives in <repo>/.github/scripts/linux-sbx: three levels up.
+DEFAULT_ROOT="$(cd "$HERE/../../.." && pwd)"
 RUST_DIR="${RUST_DIR:-$DEFAULT_ROOT/libs/cua-driver/rust}"
 command -v realpath >/dev/null 2>&1 && RUST_DIR="$(realpath "$RUST_DIR")"
 # The repository root is derived from the rust directory actually packaged, not
@@ -60,6 +64,10 @@ command -v realpath >/dev/null 2>&1 && RUST_DIR="$(realpath "$RUST_DIR")"
 REPO_ROOT="$(cd "$RUST_DIR/../../.." && pwd)"
 OUT_DIR="${OUT_DIR:-$RUST_DIR/release/dist}"
 
+# Upstream's Package step runs in libs/cua-driver/rust and copies
+# ../wayland-helper: the helper lives beside the rust workspace, not inside it.
+HELPER_DIR="$RUST_DIR/../wayland-helper"
+
 RELEASE_DIR="$RUST_DIR/target/$TARGET/release"
 STAGE_NAME="cua-driver-rs-${VERSION}-linux-${ARCH}"
 STAGE="$RUST_DIR/release/$STAGE_NAME"
@@ -67,7 +75,7 @@ STAGE="$RUST_DIR/release/$STAGE_NAME"
 for member in cua-driver cua-cursor-theme libcua_driver_sdk.so cua_driver_node_runtime.node; do
     [[ -f "$RELEASE_DIR/$member" ]] || { echo "error: missing $RELEASE_DIR/$member; run the build first" >&2; exit 1; }
 done
-for member in "$RUST_DIR/include/cua_driver_abi.h" "$RUST_DIR/wayland-helper" \
+for member in "$RUST_DIR/include/cua_driver_abi.h" "$HELPER_DIR" \
               "$RUST_DIR/THIRD_PARTY_NOTICES.md" "$REPO_ROOT/LICENSE.md"; do
     [[ -e $member ]] || { echo "error: missing $member" >&2; exit 1; }
 done
@@ -77,10 +85,12 @@ mkdir -p "$STAGE" "$OUT_DIR"
 cp "$RELEASE_DIR/cua-driver" "$RELEASE_DIR/cua-cursor-theme" \
    "$RELEASE_DIR/libcua_driver_sdk.so" "$RELEASE_DIR/cua_driver_node_runtime.node" "$STAGE/"
 cp "$RUST_DIR/include/cua_driver_abi.h" "$STAGE/"
-cp -R "$RUST_DIR/wayland-helper" "$STAGE/wayland-helper"
+cp -R "$HELPER_DIR" "$STAGE/wayland-helper"
 cp "$REPO_ROOT/LICENSE.md" "$STAGE/LICENSE"
 cp "$RUST_DIR/THIRD_PARTY_NOTICES.md" "$STAGE/THIRD_PARTY_NOTICES.md"
 
+# No macOS AppleDouble (._*) members when this is run on a Mac; a no-op on Linux.
+export COPYFILE_DISABLE=1
 (cd "$RUST_DIR/release" && tar -czf "$OUT_DIR/${STAGE_NAME}.tar.gz" "$STAGE_NAME")
 tar -czf "$OUT_DIR/${STAGE_NAME}-binary.tar.gz" -C "$STAGE" \
     cua-driver cua-cursor-theme libcua_driver_sdk.so cua_driver_node_runtime.node cua_driver_abi.h wayland-helper
@@ -103,3 +113,15 @@ fi
 )
 
 ls -lh "$OUT_DIR"
+
+# --smoke: unpack the full archive and start the packaged CLI. The Debian 11
+# container exists to pin the glibc floor, so prove the linked binary runs
+# before it ships.
+if [[ $SMOKE -eq 1 ]]; then
+    SMOKE_DIR="$(mktemp -d)"
+    trap 'rm -rf "$SMOKE_DIR"' EXIT
+    tar -xzf "$OUT_DIR/${STAGE_NAME}.tar.gz" -C "$SMOKE_DIR"
+    BIN="$SMOKE_DIR/$STAGE_NAME/cua-driver"
+    [[ -x $BIN ]] || { echo "error: $BIN is missing or not executable" >&2; exit 1; }
+    "$BIN" --version
+fi

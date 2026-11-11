@@ -10,11 +10,25 @@ archives, and publishes them as a prerelease here.
 | `select_upstream_tag.sh` | Highest stable `cua-driver-rs-vX.Y.Z` tag upstream |
 | `rebase_onto_tag.sh` | Replay the branch's patch commits onto that tag |
 | `next_prerelease_tag.sh` | `cua-driver-rs-vX.Y.Z-linux-sbx.<N>`, one past the highest published |
-| `pack_linux_artifact.sh` | Full and `-binary` archives, `SHA256SUMS` |
+| `report_conflict.sh` | Conflict issue, or an explicit error when it cannot be opened; always fails the run |
+| `apt_bootstrap.sh` | Debian 11 build packages: frozen snapshot mirror, archive mirror as fallback |
+| `pack_linux_artifact.sh` | Full and `-binary` archives, `SHA256SUMS`, `--smoke` start of the packaged CLI |
 | `sign_release_assets.sh` | cosign keyless signature, `.sig` and `.pem` per asset |
+| `publish_prerelease.sh` | Release notes and `gh release create --prerelease --latest=false` |
+| `verify_release_assets.sh` | Reads the release back: both archives, `SHA256SUMS`, and all three signature files each |
 
 Everything that decides something lives in these scripts, so each can be run
-by hand against a checkout. The workflow only sequences them.
+by hand against a checkout, with `gh` and `apt-get` replaced by stubs on PATH.
+The workflow only holds triggers, permissions, env and step order.
+
+## Prerequisite: the default branch
+
+GitHub only reads scheduled workflows and the Run workflow button from the
+default branch. The fork's default branch therefore needs to be set to
+`linux-sbx-patch` (schedule and workflow_dispatch only see the workflow on the
+default branch); until then neither the weekly run nor manual dispatch exists.
+Actions and Issues also need to be enabled on the fork, and the workflow token
+needs write access so the branch push and the release can succeed.
 
 ## What a run does
 
@@ -30,8 +44,11 @@ by hand against a checkout. The workflow only sequences them.
    exits 10 without pushing anything.
 4. **Build.** `debian:11` container, x86_64, release profile, then the Node
    runtime, the archives, a `--version` smoke test, and an artifact upload.
-5. **Publish.** Signs every asset keylessly through GitHub OIDC, creates the
-   prerelease with `--latest=false`, and verifies the result.
+   Every step runs under Bash (`defaults.run.shell`): the container's `sh` is
+   dash. The build checks out the exact commit the rebase pushed.
+5. **Publish.** Checks out that same commit, signs every asset keylessly
+   through GitHub OIDC, creates the prerelease with `--latest=false`, and reads
+   the release back to confirm every archive and signature is attached.
 
 ## Running it by hand
 
@@ -40,9 +57,10 @@ Actions, **Weekly: Linux sandbox driver**, **Run workflow**. Three inputs:
 - `upstream_tag` (string, empty by default): rebase onto this exact tag instead
   of the newest one. It must be a stable `cua-driver-rs-vX.Y.Z` tag; the script
   refuses a prerelease.
-- `publish` (boolean, on by default): turn it off to rebase, build, sign and
-  keep the result as a workflow artifact without creating a release. Nothing is
-  tagged, so `SHA256SUMS` and the signatures can be checked before publishing.
+- `publish` (boolean, on by default): turn it off to rebase and build only.
+  The archives and `SHA256SUMS` are kept as the `linux-sbx-x86_64` run artifact,
+  **unsigned**: signing happens only in the publish job, which is skipped.
+  Nothing is tagged or released.
 - `skip_push` (boolean, off by default): rehearse the rebase without pushing
   `linux-sbx-patch`. This also skips the build, because the build job checks out
   the pushed commit rather than the runner-local one.
@@ -86,9 +104,9 @@ on:
 
 That is Monday 05:23 UTC, after the weekend's release merges and off the hour so
 it does not queue behind GitHub's hourly jobs. Scheduled runs use the default
-branch's copy of this workflow, so the new cron only takes effect once it is on
-the default branch. To stop the weekly run, delete the `schedule` block and keep
-`workflow_dispatch`.
+branch's copy of this workflow (see the prerequisite above), so a new cron takes
+effect once it is pushed there. To stop the weekly run, delete the `schedule`
+block and keep `workflow_dispatch`.
 
 ## Verifying a published archive
 
@@ -117,5 +135,5 @@ not have, so every run would fail before the Linux job reported anything. The
 upstream file is left untouched.
 
 The container is `debian:11` for the same reason it is upstream: glibc 2.31 is
-the floor, so the binaries run on Debian 11+, Ubuntu 20.04+ and RHEL/Rocky 8+.
+the floor, so the binaries run on Debian 11+ and Ubuntu 20.04+.
 Building on `ubuntu-latest` would silently raise that floor.
