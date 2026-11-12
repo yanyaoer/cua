@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # Publish one weekly run from this machine, with the local `gh` login.
 #
-#   publish_local.sh <run-id> [--dry-run] [--repo owner/repo] [--remote origin]
+#   publish_local.sh <run-id> [--dry-run] [--repo yanyaoer/cua] [--remote origin]
 #                    [--branch linux-sbx-patch] [--upstream-url URL]
 #                    [--upstream-repo trycua/cua] [--workdir DIR]
+#                    [--assume-workflow-scope]
 #
 # Actions cannot push linux-sbx-patch (the job token may not update workflow
 # files) and holds no other credential, so the weekly run stops at an artifact.
 # This script finishes it. Run it from a checkout of the fork:
 #
 #   verify (read-only; any failure exits non-zero before anything is written)
-#     1. the active gh account has the `workflow` scope the push needs, and
-#        --remote is --repo on GitHub;
+#     0. the repository (--repo, or what `gh repo view` reports) is yanyaoer/cua,
+#        the only repository this script publishes to;
+#     1. gh reports the `workflow` scope the push needs (a token that reports
+#        no scopes is refused unless --assume-workflow-scope is given), and
+#        --remote is github.com/yanyaoer/cua;
 #     2. the run is a successful run of linux-sbx-weekly.yml in --repo;
 #     3. download its `linux-sbx-release` artifact;
 #     4. metadata is well formed and names this run, repository and --branch;
@@ -27,18 +31,28 @@
 #   write (skipped, only printed, with --dry-run)
 #     9. git push --force-with-lease=refs/heads/<branch>:<remote sha now>
 #    10. create the prerelease (publish_prerelease.sh) unless a linux-sbx tag
-#        already points at rebased_sha, then read it back
-#        (verify_release_assets.sh).
+#        already points at rebased_sha and has a release; a tag that is there
+#        without a release gets its release on that tag (the tag is neither
+#        created nor moved); then read it back (verify_release_assets.sh).
 #
 # Re-running after a complete publish is a no-op: the pushed branch and the
-# existing release are detected and skipped. A publish interrupted inside
-# `gh release create` (it uploads assets to a draft, then publishes) is not
-# repaired automatically: the read-back fails, and the draft or the incomplete
-# release has to be finished or deleted by hand. Nothing here prints a token.
+# existing release are detected and skipped. A linux-sbx tag already at
+# rebased_sha without a release (pushed by hand, or its release deleted) gets
+# its release on the next run. A publish interrupted inside `gh release
+# create` (it uploads assets to a draft, then publishes) is not repaired
+# automatically: the read-back fails, and the draft or the incomplete release
+# has to be finished or deleted by hand. Nothing here prints a token.
 set -euo pipefail
+
+# The one repository this publishes to. The weekly run, its artifact, the
+# cosign signatures, the provenance attestations and the prerelease all belong
+# to this fork; pushing its rebased branch or creating its release anywhere
+# else is a mistake, whatever --repo or the checkout's remote says.
+FORK_REPO="yanyaoer/cua"
 
 RUN_ID=""
 DRY_RUN=0
+ASSUME_WORKFLOW_SCOPE=0
 REPO=""
 REMOTE="origin"
 EXPECT_BRANCH="linux-sbx-patch"
@@ -49,7 +63,7 @@ WORKFLOW_FILE="linux-sbx-weekly.yml"
 WORKFLOW_NAME="Weekly: Linux sandbox driver"
 ARTIFACT="linux-sbx-release"
 
-usage() { sed -n '2,39p' "$0"; }
+usage() { sed -n '2,44p' "$0"; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -60,6 +74,7 @@ while [[ $# -gt 0 ]]; do
         --upstream-url) UPSTREAM_URL="$2"; shift 2 ;;
         --upstream-repo) UPSTREAM_REPO="$2"; shift 2 ;;
         --workdir) WORKDIR="$2"; shift 2 ;;
+        --assume-workflow-scope) ASSUME_WORKFLOW_SCOPE=1; shift ;;
         -h|--help) usage; exit 0 ;;
         -*) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
         *) [[ -z $RUN_ID ]] || { echo "error: one run id only" >&2; exit 2; }; RUN_ID="$1"; shift ;;
@@ -84,7 +99,8 @@ git rev-parse --git-dir >/dev/null 2>&1 || die "run this from a checkout of the 
 if [[ -z $REPO ]]; then
     REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" || die "cannot tell which repository this is; pass --repo"
 fi
-[[ $REPO =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "bad --repo '$REPO'"
+[[ $REPO == "$FORK_REPO" ]] \
+    || die "this script publishes only $FORK_REPO, not '$REPO' (its run, signatures, attestations and release belong to $FORK_REPO)"
 if [[ -z $WORKDIR ]]; then
     WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/linux-sbx-publish.XXXXXX")"
 fi
@@ -96,7 +112,13 @@ step "1. gh login and remote"
 AUTH="$(gh auth status --active --hostname github.com 2>&1)" || die "gh is not logged in to github.com (gh auth login)"
 SCOPES="$(grep -i 'token scopes' <<<"$AUTH" || true)"
 if [[ -z $SCOPES ]]; then
-    echo "warning: gh did not report token scopes; the push needs permission to update workflow files"
+    # Fine-grained tokens and some GH_TOKEN setups report no scopes. Not
+    # confirmed is treated as missing: the push would fail half-way otherwise.
+    if [[ $ASSUME_WORKFLOW_SCOPE -eq 1 ]]; then
+        echo "note: gh did not report token scopes; continuing on --assume-workflow-scope"
+    else
+        die "gh did not report token scopes, so the 'workflow' scope the push needs (the branch deletes workflow files) cannot be confirmed: log in with a classic token that has it (gh auth refresh -s workflow), or pass --assume-workflow-scope if this token can update workflow files"
+    fi
 elif [[ $SCOPES != *workflow* ]]; then
     die "the gh token lacks the 'workflow' scope the push needs (the branch deletes workflow files): gh auth refresh -s workflow"
 else
@@ -105,10 +127,10 @@ fi
 # The configured URL, before any insteadOf rewriting: the branch must go to the
 # same repository the run, the attestations and the release belong to.
 REMOTE_URL="$(git config --get "remote.${REMOTE}.url")" || die "no remote '$REMOTE' in this checkout"
-if [[ ! $REMOTE_URL =~ github\.com[:/]${REPO//./\.}(\.git)?/?$ ]]; then
-    die "remote '$REMOTE' is $REMOTE_URL, not github.com/$REPO; pass --remote or --repo"
+if [[ ! $REMOTE_URL =~ github\.com[:/]${FORK_REPO//./\.}(\.git)?/?$ ]]; then
+    die "remote '$REMOTE' is $REMOTE_URL, not github.com/$FORK_REPO; pass --remote naming it"
 fi
-echo "ok: $REMOTE is github.com/$REPO"
+echo "ok: $REMOTE is github.com/$FORK_REPO"
 
 step "2. run $RUN_ID in $REPO"
 RUN_INFO="$(gh run view "$RUN_ID" --repo "$REPO" --json status,conclusion,workflowName \
@@ -190,15 +212,25 @@ TAG_TARGETS="$(git ls-remote "$REMOTE" 'refs/tags/cua-driver-rs-v*-linux-sbx.*' 
     | awk '{ name = $2; sub("^refs/tags/", "", name); sub("\\^\\{\\}$", "", name); t[name] = $1 }
            END { for (n in t) print n, t[n] }' | sort)"
 CREATE=1
+EXISTING_TAG=()
 RELEASED_AS="$(awk -v sha="$REBASED" -v want="$PRE_TAG" '$2 == sha { if ($1 == want) { print $1; f = 1; exit } any = $1 } END { if (!f && any) print any }' <<<"$TAG_TARGETS")"
 if [[ -n $RELEASED_AS ]]; then
-    # This commit already has a prerelease (an unchanged week, or a re-run).
-    gh release view "$RELEASED_AS" --repo "$REPO" --json tagName >/dev/null 2>&1 \
-        || die "$RELEASED_AS points at $REBASED but has no release; inspect it by hand"
-    CREATE=0
-    [[ $RELEASED_AS == "$PRE_TAG" ]] || echo "note: $REBASED was already released as $RELEASED_AS; not creating $PRE_TAG"
+    # This commit already has a linux-sbx tag (an unchanged week, or a re-run).
+    CANDIDATE="$PRE_TAG"
     PRE_TAG="$RELEASED_AS"
-    echo "ok: $PRE_TAG is already released at $REBASED"
+    if VIEW_ERR="$(gh release view "$PRE_TAG" --repo "$REPO" --json tagName 2>&1 >/dev/null)"; then
+        CREATE=0
+        [[ $PRE_TAG == "$CANDIDATE" ]] || echo "note: $REBASED was already released as $PRE_TAG; not creating $CANDIDATE"
+        echo "ok: $PRE_TAG is already released at $REBASED"
+    elif [[ $VIEW_ERR == *"release not found"* ]]; then
+        # The tag is there (pushed by hand, or its release deleted) but has no
+        # release: create the release on that tag, without creating or moving it.
+        EXISTING_TAG=(--existing-tag)
+        [[ $PRE_TAG == "$CANDIDATE" ]] || echo "note: $REBASED is already tagged $PRE_TAG; not creating $CANDIDATE"
+        echo "ok: $PRE_TAG is at $REBASED without a release; the release will be created on it"
+    else
+        die "cannot tell whether $PRE_TAG has a release: $VIEW_ERR"
+    fi
 elif awk -v want="$PRE_TAG" '$1 == want { f = 1 } END { exit !f }' <<<"$TAG_TARGETS"; then
     die "$PRE_TAG already exists on $REMOTE for another commit: re-run the workflow for a fresh number"
 fi
@@ -214,7 +246,7 @@ if [[ $CREATE -eq 1 ]]; then
         --tag "$PRE_TAG" --source-sha "$REBASED" --upstream-tag "$TAG" \
         --upstream-repo "$UPSTREAM_REPO" --repository "$REPO" --branch "$BRANCH" \
         --dist "$DIST" --rebase-result "$(m rebase_result)" --patch-commits "$(m patch_commits)" \
-        --summary ""
+        --summary "" ${EXISTING_TAG[@]+"${EXISTING_TAG[@]}"}
 fi
 if [[ $DRY_RUN -eq 0 ]]; then
     GH_REPO="$REPO" bash "$HERE/verify_release_assets.sh" --tag "$PRE_TAG" --arch x86_64 --summary ""

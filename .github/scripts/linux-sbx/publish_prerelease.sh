@@ -6,11 +6,15 @@
 #       --upstream-repo trycua/cua --repository owner/repo \
 #       --branch linux-sbx-patch --dist dist \
 #       [--rebase-result rebased] [--patch-commits 2] [--summary FILE]
+#       [--existing-tag]
 #
 # The release is always:
 #   - a prerelease, never the repository's Latest (--latest=false);
 #   - tagged on --source-sha, the commit that was built, not the commit this
 #     workflow happens to run from (--target);
+#   - with --existing-tag: attached to the tag that is already on GitHub
+#     (--verify-tag, no --target). The caller has checked that the tag points
+#     at --source-sha; gh refuses if the tag is missing, and never moves it;
 #   - carrying every file in --dist (archives, SHA256SUMS and their signatures).
 #
 # The notes are an introduction (source commit, rebase outcome, how to verify
@@ -31,8 +35,9 @@ DIST=""
 REBASE_RESULT=""
 PATCH_COMMITS=""
 SUMMARY="${GITHUB_STEP_SUMMARY:-}"
+EXISTING_TAG=0
 
-usage() { sed -n '2,8p' "$0"; }
+usage() { sed -n '2,9p' "$0"; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -46,6 +51,7 @@ while [[ $# -gt 0 ]]; do
         --rebase-result) REBASE_RESULT="$2"; shift 2 ;;
         --patch-commits) PATCH_COMMITS="$2"; shift 2 ;;
         --summary) SUMMARY="$2"; shift 2 ;;
+        --existing-tag) EXISTING_TAG=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -109,8 +115,13 @@ fi
 
 # --latest=false: a component prerelease never takes the repository-wide
 # Latest badge.
+if [[ $EXISTING_TAG -eq 1 ]]; then
+    TAG_ARGS=(--verify-tag)
+else
+    TAG_ARGS=(--target "$SOURCE_SHA")
+fi
 gh release create "$TAG" \
-    --target "$SOURCE_SHA" \
+    "${TAG_ARGS[@]}" \
     --title "$TAG" \
     --notes-file "$NOTES" \
     --prerelease \

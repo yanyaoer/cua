@@ -45,9 +45,9 @@ by hand, with `gh` and `apt-get` replaced by stubs on PATH.
 - Actions and Issues enabled on the fork. The job token never needs write
   access to contents.
 - On the publishing machine: a checkout of the fork with `origin` pointing at
-  it, and `gh` logged in with the `repo` and `workflow` scopes
-  (`gh auth refresh -s workflow`). The branch the script pushes deletes workflow
-  files, which needs `workflow`.
+  `github.com/yanyaoer/cua`, and `gh` logged in with the `repo` and `workflow`
+  scopes (`gh auth refresh -s workflow`). The branch the script pushes deletes
+  workflow files, which needs `workflow`.
 
 ## What a weekly run does (Actions)
 
@@ -93,14 +93,27 @@ From a checkout of the fork, with the run id from the run page or
 .github/scripts/linux-sbx/publish_local.sh <run-id>
 ```
 
-Before writing anything it verifies, in order: the active gh account's
-`workflow` scope, and that `origin` is this repository on GitHub; that the run is
-a successful run of this workflow; the downloaded metadata (run id, repository,
-branch `linux-sbx-patch`, formats); the bundle's sha256; `SHA256SUMS`; every
-archive's cosign files; `gh attestation verify` for each archive, `SHA256SUMS`,
+`publish_local.sh` publishes only to `yanyaoer/cua` (a constant in the script):
+the run, its signatures, the attestations and the release all belong to this
+fork. `--repo` defaults to what `gh repo view` reports; if that or `--repo` is
+any other repository, or `origin` (or `--remote`) is not
+`github.com/yanyaoer/cua`, it stops before reading the run.
+
+Before writing anything it verifies, in order: the repository as above; the
+active gh account's `workflow` scope; that the remote is
+`github.com/yanyaoer/cua`; that the run is a successful run of this workflow;
+the downloaded metadata (run id, repository, branch `linux-sbx-patch`,
+formats); the bundle's sha256; `SHA256SUMS`; every archive's cosign files; `gh attestation verify` for each archive, `SHA256SUMS`,
 the bundle and the metadata (signer: this repository's `linux-sbx-weekly.yml`,
 run from `refs/heads/linux-sbx-patch`); `git bundle verify` against the upstream
 tag and that the bundle's branch head is the recorded sha.
+
+If gh reports no token scopes at all (fine-grained tokens, some `GH_TOKEN`
+setups), the `workflow` scope cannot be confirmed and the script stops. Log in
+with a classic token that has it (`gh auth refresh -s workflow`), or, if the
+token is known to be allowed to update workflow files (a fine-grained token with
+Workflows: read and write), pass `--assume-workflow-scope`.
+
 Then:
 
 - **Push.** Only if `origin/linux-sbx-patch` is still the sha the run started
@@ -111,9 +124,14 @@ Then:
 - **Release.** `gh release create <tag> --target <rebased sha> --prerelease
   --latest=false` with the archives, `SHA256SUMS` and their signature files, then
   read back to confirm every file is attached. If any linux-sbx prerelease tag
-  already points at the rebased sha (an unchanged week, or a re-run), no new
-  release is made. If the candidate tag was taken by a different commit meanwhile,
-  the script stops; dispatch a new run for a fresh number.
+  already points at the rebased sha (an unchanged week, or a re-run), no new tag
+  is made: if that tag has a release, the release step is skipped; if it has
+  none (tag pushed by hand, or its release deleted), the release is created on
+  that tag with `gh release create <tag> --verify-tag` (no `--target`; the tag
+  is neither created nor moved). If gh cannot say whether the release exists
+  (any error other than "release not found"), the script stops. If the
+  candidate tag was taken by a different commit meanwhile, the script stops;
+  dispatch a new run for a fresh number.
 
 Re-running after a complete publish is a no-op. A publish interrupted inside
 `gh release create` (which uploads to a draft and then publishes it) is not
