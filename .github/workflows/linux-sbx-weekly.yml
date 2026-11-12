@@ -1,31 +1,34 @@
 name: "Weekly: Linux sandbox driver"
 
-# Rebuilds the `linux-sbx-patch` branch of this fork once a week on top of the
-# newest upstream Cua Driver release, builds the Linux x86_64 archives, and
-# publishes them as a prerelease of this repository.
+# Rebases the `linux-sbx-patch` branch of this fork once a week onto the newest
+# upstream Cua Driver release, builds the Linux x86_64 archives, signs them, and
+# leaves everything as one run artifact. It pushes nothing and releases
+# nothing: the job token may not push commits that change workflow files, and
+# this fork keeps no other credential on GitHub. Publishing (pushing the branch
+# and creating the prerelease) is .github/scripts/linux-sbx/publish_local.sh,
+# run on a maintainer's machine with their own gh login; see the README there.
 #
-# The branch carries local patches on top of upstream. Upstream moves, so this
-# replays those patches onto the newest stable `cua-driver-rs-v*` tag instead of
-# letting them drift. Every decision lives in .github/scripts/linux-sbx/ so it
-# can be run and tested outside Actions; the jobs here only hold triggers,
-# permissions, env and step order:
+# Every decision lives in .github/scripts/linux-sbx/ so it can be run and tested
+# outside Actions; the jobs here only hold triggers, permissions, env and step
+# order:
 #
-#   select_upstream_tag.sh     highest stable cua-driver-rs-vX.Y.Z tag upstream
-#   next_prerelease_tag.sh     cua-driver-rs-vX.Y.Z-linux-sbx.<N> for this build
-#   rebase_onto_tag.sh         replay the patch commits; stop on conflict
-#   report_conflict.sh         conflict issue, and a red run either way
-#   apt_bootstrap.sh           Debian 11 packages, snapshot then archive mirror
-#   pack_linux_artifact.sh     archives, SHA256SUMS, smoke test
-#   sign_release_assets.sh     cosign keyless signatures (OIDC, no private key)
-#   publish_prerelease.sh      release notes and the prerelease itself
-#   verify_release_assets.sh   every published file is there and signed
+#   select_upstream_tag.sh       highest stable cua-driver-rs-vX.Y.Z tag upstream
+#   next_prerelease_tag.sh       cua-driver-rs-vX.Y.Z-linux-sbx.<N> candidate
+#   rebase_onto_tag.sh           replay the patch commits; stop on conflict
+#   prune_upstream_workflows.sh  commit removing upstream's other workflows
+#   make_source_bundle.sh        git bundle of the result, plus metadata
+#   report_conflict.sh           conflict issue, and a red run either way
+#   apt_bootstrap.sh             Debian 11 packages, snapshot then archive mirror
+#   checkout_from_bundle.sh      build source comes out of the bundle
+#   pack_linux_artifact.sh       archives, SHA256SUMS, smoke test
+#   assemble_release.sh          build output + bundle, checked against metadata
+#   sign_release_assets.sh       cosign keyless signatures (OIDC, no private key)
 #
 # This workflow never uses the upstream reusable workflow
 # (cd-rust-cua-driver.yml): its Windows and macOS jobs run unconditionally under
 # workflow_call and need Azure and Apple signing credentials this fork does not
-# hold, so every run would fail before the Linux job could report anything. The
-# build below mirrors that workflow's Linux x86_64 job instead, inside the same
-# Debian 11 container that pins its glibc floor.
+# hold. The build below mirrors that workflow's Linux x86_64 job instead, inside
+# the same Debian 11 container that pins its glibc floor.
 #
 # Schedules and the Run workflow button only see the copy of this file on the
 # repository's default branch, so the fork's default branch has to be
@@ -40,21 +43,12 @@ on:
   workflow_dispatch:
     inputs:
       upstream_tag:
-        description: "Exact upstream tag to rebase onto (default: the newest stable cua-driver-rs-vX.Y.Z)"
+        description: "Exact upstream tag to rebase onto (default: the newest stable cua-driver-rs-vX.Y.Z). Runs never push or release; publish_local.sh does."
         required: false
         type: string
-      publish:
-        description: "Publish the prerelease (off: rebase and build only; unsigned archives stay as a run artifact, nothing is released)"
-        required: false
-        default: true
-        type: boolean
-      skip_push:
-        description: "Rehearse the rebase without pushing linux-sbx-patch (skips the build: it needs the pushed commit)"
-        required: false
-        default: false
-        type: boolean
 
 # Least privilege: no scope at the top, each job asks for what it uses.
+# Artifacts of the same run move with the runtime token, not GITHUB_TOKEN.
 permissions: {}
 
 concurrency:
@@ -81,24 +75,19 @@ jobs:
     name: Rebase linux-sbx-patch onto ${{ github.event.inputs.upstream_tag || 'the newest upstream release' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Pushes the rebased branch back to this repository.
+    # Reads the branch; never pushes.
     permissions:
-      contents: write
+      contents: read
     outputs:
-      sha: ${{ steps.rebase.outputs.sha }}
-      result: ${{ steps.rebase.outputs.result }}
-      patch_commits: ${{ steps.rebase.outputs.patch_commits }}
-      version: ${{ steps.select.outputs.version }}
+      sha: ${{ steps.prune.outputs.sha }}
       upstream_tag: ${{ steps.select.outputs.tag }}
       prerelease: ${{ steps.prerelease.outputs.prerelease }}
-      prerelease_tag: ${{ steps.prerelease.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.PATCH_BRANCH }}
           fetch-depth: 0
-          # The push below authenticates with this job's GITHUB_TOKEN.
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Select the upstream release tag
         id: select
@@ -111,7 +100,7 @@ jobs:
           if [[ -n "$EXACT_TAG" ]]; then ARGS+=(--exact "$EXACT_TAG"); fi
           "$SCRIPTS/select_upstream_tag.sh" "${ARGS[@]}"
 
-      - name: Compute the next prerelease tag
+      - name: Compute the prerelease tag candidate
         id: prerelease
         env:
           UPSTREAM_VERSION: ${{ steps.select.outputs.version }}
@@ -125,27 +114,56 @@ jobs:
         env:
           UPSTREAM_TAG: ${{ steps.select.outputs.tag }}
           UPSTREAM_URL: https://github.com/${{ env.UPSTREAM_REPOSITORY }}
-          SKIP_PUSH: ${{ github.event.inputs.skip_push == 'true' }}
           CONFLICT_REPORT: ${{ runner.temp }}/linux-sbx-rebase-conflict.md
         run: |
           set -euo pipefail
-          ARGS=(
-            --branch "$PATCH_BRANCH"
-            --upstream-ref "$UPSTREAM_TAG"
-            --upstream-url "$UPSTREAM_URL"
+          "$SCRIPTS/rebase_onto_tag.sh" \
+            --branch "$PATCH_BRANCH" \
+            --upstream-ref "$UPSTREAM_TAG" \
+            --upstream-url "$UPSTREAM_URL" \
             --conflict-report "$CONFLICT_REPORT"
-          )
-          if [[ "$SKIP_PUSH" != "true" ]]; then ARGS+=(--push); fi
-          "$SCRIPTS/rebase_onto_tag.sh" "${ARGS[@]}"
 
-      # The debian:11 build container has no git or curl until apt runs, so it
-      # cannot check out the repository to reach apt_bootstrap.sh. Hand it the
-      # script from the rebased tree instead.
-      - name: Hand the apt bootstrap to the build container
+      - name: Remove upstream's other workflows
+        id: prune
+        run: |
+          set -euo pipefail
+          "$SCRIPTS/prune_upstream_workflows.sh" --keep linux-sbx-weekly.yml
+
+      - name: Bundle the rebased branch
+        env:
+          UPSTREAM_TAG: ${{ steps.select.outputs.tag }}
+          PREVIOUS_SHA: ${{ steps.rebase.outputs.previous_sha }}
+          PRERELEASE_TAG: ${{ steps.prerelease.outputs.tag }}
+          REBASE_RESULT: ${{ steps.rebase.outputs.result }}
+          PATCH_COMMITS: ${{ steps.rebase.outputs.patch_commits }}
+        run: |
+          set -euo pipefail
+          "$SCRIPTS/make_source_bundle.sh" \
+            --branch "$PATCH_BRANCH" \
+            --upstream-tag "$UPSTREAM_TAG" \
+            --previous-sha "$PREVIOUS_SHA" \
+            --prerelease-tag "$PRERELEASE_TAG" \
+            --rebase-result "$REBASE_RESULT" \
+            --patch-commits "$PATCH_COMMITS" \
+            --run-id "$GITHUB_RUN_ID" \
+            --repository "$GITHUB_REPOSITORY" \
+            --out "$RUNNER_TEMP/source"
+
+      - name: Upload the source bundle
         uses: actions/upload-artifact@v4
         with:
-          name: linux-sbx-bootstrap
-          path: ${{ env.SCRIPTS }}/apt_bootstrap.sh
+          name: linux-sbx-source
+          path: ${{ runner.temp }}/source
+          if-no-files-found: error
+          retention-days: 7
+
+      # The debian:11 build container has no git or curl until apt runs, and
+      # the attest job checks nothing out: both take the scripts from here.
+      - name: Upload the scripts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-sbx-scripts
+          path: ${{ env.SCRIPTS }}
           if-no-files-found: error
           retention-days: 1
 
@@ -167,8 +185,6 @@ jobs:
     if: ${{ always() && needs.rebase.result == 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Artifacts from the same run download with the runtime token, so no
-    # actions scope is needed here, in build or in publish.
     permissions:
       contents: read
       issues: write
@@ -178,8 +194,8 @@ jobs:
           sparse-checkout: .github/scripts/linux-sbx
           persist-credentials: false
 
-      # Absent when the rebase failed for a reason other than a conflict;
-      # report_conflict.sh tells the two apart.
+      # Absent when the rebase job failed for a reason other than a conflict;
+      # report_conflict.sh tells the two apart and fails either way.
       - name: Download the conflict report
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -204,34 +220,43 @@ jobs:
   build:
     name: Build linux-x86_64
     needs: rebase
-    # skip_push leaves the rebased commit only on the rebase runner, so there is
-    # nothing for this job to check out. Say that with a skip, not a failure.
-    if: ${{ needs.rebase.result == 'success' && github.event.inputs.skip_push != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    permissions:
-      contents: read
+    # Nothing here talks to this repository: the source comes from the bundle
+    # and the upstream tag is public.
+    permissions: {}
     # Same container as the upstream build-linux job: Debian 11's glibc is 2.31,
     # so the binaries run on Debian 11+ and Ubuntu 20.04+. The ubuntu-latest
     # host image (glibc 2.39) would raise that floor silently.
     container:
       image: debian:11
     steps:
-      - name: Fetch the apt bootstrap
+      - name: Fetch the scripts
         uses: actions/download-artifact@v4
         with:
-          name: linux-sbx-bootstrap
-          path: ${{ runner.temp }}/bootstrap
+          name: linux-sbx-scripts
+          path: ${{ runner.temp }}/scripts
 
       - name: Install base tooling (container is bare)
-        run: sh "$RUNNER_TEMP/bootstrap/apt_bootstrap.sh"
+        run: sh "$RUNNER_TEMP/scripts/apt_bootstrap.sh"
 
-      # The exact commit the rebase job pushed: the branch may have moved since.
-      - uses: actions/checkout@v4
+      - name: Fetch the source bundle
+        uses: actions/download-artifact@v4
         with:
-          ref: ${{ needs.rebase.outputs.sha }}
-          fetch-depth: 1
-          persist-credentials: false
+          name: linux-sbx-source
+          path: ${{ runner.temp }}/source
+
+      - name: Check out the rebased source from the bundle
+        env:
+          UPSTREAM_URL: https://github.com/${{ env.UPSTREAM_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          bash "$RUNNER_TEMP/scripts/checkout_from_bundle.sh" \
+            --source-dir "$RUNNER_TEMP/source" \
+            --upstream-url "$UPSTREAM_URL" \
+            --dest "$GITHUB_WORKSPACE" \
+            --trust-dest \
+            --copy-metadata-to "$RUNNER_TEMP/build-out/source"
 
       - uses: actions/setup-node@v4
         with:
@@ -281,81 +306,80 @@ jobs:
             --version "$VERSION" \
             --arch x86_64 \
             --target x86_64-unknown-linux-gnu \
-            --out-dir "$RUNNER_TEMP/dist" \
+            --out-dir "$RUNNER_TEMP/build-out/dist" \
             --smoke
 
+      # Binaries plus the metadata they were built against (upstream tag,
+      # rebased sha, bundle sha256, prerelease candidate), staged under one
+      # directory by the two steps above. One single-line path on purpose: in a
+      # container job the runner maps a host path in `with:` to the container
+      # only at the start of the value, so the lines after the first of a
+      # multi-line `path:` would point at nothing and be skipped silently.
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-sbx-x86_64
-          path: |
-            ${{ runner.temp }}/dist/*.tar.gz
-            ${{ runner.temp }}/dist/SHA256SUMS
+          name: linux-sbx-build
+          path: ${{ runner.temp }}/build-out
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
 
-  publish:
-    name: Publish ${{ needs.rebase.outputs.prerelease_tag }}
+  attest:
+    name: Sign and attest the release artifact
     needs: [rebase, build]
-    # inputs is empty on a schedule run, so `!= false` (not `== true`) is what
-    # keeps publishing on by default and lets a dispatch turn it off.
-    if: ${{ needs.build.result == 'success' && github.event.inputs.publish != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      # contents: write creates the tag and the release; id-token is the OIDC
-      # identity cosign signs with, so no private key ever exists in this
-      # public fork.
-      contents: write
+      # The OIDC identity cosign and the provenance attestation sign with; no
+      # private key exists in this public fork. Neither pushes nor releases.
       id-token: write
+      attestations: write
     steps:
-      # The commit that was built, so the scripts that sign and publish are the
-      # ones from the released source, whichever branch triggered the run.
-      - uses: actions/checkout@v4
+      - name: Fetch the scripts
+        uses: actions/download-artifact@v4
         with:
-          ref: ${{ needs.rebase.outputs.sha }}
-          fetch-depth: 1
-          persist-credentials: false
+          name: linux-sbx-scripts
+          path: ${{ runner.temp }}/scripts
 
-      - uses: actions/download-artifact@v4
+      - name: Fetch the source bundle
+        uses: actions/download-artifact@v4
         with:
-          name: linux-sbx-x86_64
-          path: ${{ runner.temp }}/dist
+          name: linux-sbx-source
+          path: ${{ runner.temp }}/in/source
+
+      - name: Fetch the build output
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-sbx-build
+          path: ${{ runner.temp }}/in/build
+
+      - name: Assemble and cross-check
+        run: |
+          set -euo pipefail
+          bash "$RUNNER_TEMP/scripts/assemble_release.sh" \
+            --build-dir "$RUNNER_TEMP/in/build" \
+            --source-dir "$RUNNER_TEMP/in/source" \
+            --out "$RUNNER_TEMP/release"
 
       - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
 
-      - name: Sign the assets keylessly
+      - name: Sign the release assets keylessly
         run: |
           set -euo pipefail
-          "$SCRIPTS/sign_release_assets.sh" --dir "$RUNNER_TEMP/dist"
+          bash "$RUNNER_TEMP/scripts/sign_release_assets.sh" --dir "$RUNNER_TEMP/release/dist"
 
-      - name: Create the prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ needs.rebase.outputs.prerelease_tag }}
-          SOURCE_SHA: ${{ needs.rebase.outputs.sha }}
-          UPSTREAM_TAG: ${{ needs.rebase.outputs.upstream_tag }}
-          REBASE_RESULT: ${{ needs.rebase.outputs.result }}
-          PATCH_COMMITS: ${{ needs.rebase.outputs.patch_commits }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          "$SCRIPTS/publish_prerelease.sh" \
-            --tag "$TAG" \
-            --source-sha "$SOURCE_SHA" \
-            --upstream-tag "$UPSTREAM_TAG" \
-            --upstream-repo "$UPSTREAM_REPOSITORY" \
-            --repository "$REPOSITORY" \
-            --branch "$PATCH_BRANCH" \
-            --dist "$RUNNER_TEMP/dist" \
-            --rebase-result "$REBASE_RESULT" \
-            --patch-commits "$PATCH_COMMITS"
+      # What publish_local.sh checks with `gh attestation verify`.
+      # Unpinned like the other attest-build-provenance use in this repository
+      # (cd-cua-spaces-build.yml).
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            ${{ runner.temp }}/release/dist/*.tar.gz
+            ${{ runner.temp }}/release/dist/SHA256SUMS
+            ${{ runner.temp }}/release/source/*
 
-      - name: Verify the release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ needs.rebase.outputs.prerelease_tag }}
-        run: |
-          set -euo pipefail
-          "$SCRIPTS/verify_release_assets.sh" --tag "$TAG" --arch x86_64
+      - name: Upload the release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-sbx-release
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
+          retention-days: 30
