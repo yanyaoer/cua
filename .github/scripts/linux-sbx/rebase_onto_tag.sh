@@ -132,10 +132,24 @@ if [[ ${#STABLE_TAGS[@]} -gt 0 ]]; then
     done < <(git rev-list --reverse "$BRANCH" --not "${STABLE_TAGS[@]}")
 fi
 
+# Commits this pipeline generates itself (prune_upstream_workflows.sh marks
+# them with a `Linux-Sbx-Generated:` trailer) are not patches: they are dropped
+# from the replay and generated afresh on top of the new tag. Replaying last
+# week's prune would conflict every time upstream edits a workflow it deleted.
+GENERATED=()
+REPLAY=()
+for commit in ${PATCH_COMMITS[@]+"${PATCH_COMMITS[@]}"}; do
+    if git log -1 --format=%B "$commit" | grep -q '^Linux-Sbx-Generated: '; then
+        GENERATED+=("$commit")
+    else
+        REPLAY+=("$commit")
+    fi
+done
+
 say "### Rebase \`${BRANCH}\` onto \`${UPSTREAM_REF}\`"
 say ""
 say "- upstream baseline tags considered: ${#STABLE_TAGS[@]}"
-say "- patch commits to replay: ${#PATCH_COMMITS[@]}"
+say "- patch commits to replay: ${#REPLAY[@]} (generated commits dropped: ${#GENERATED[@]})"
 
 # Already there: nothing to replay and nothing to move.
 if [[ $PREVIOUS_SHA == "$TAG_SHA" ]]; then
@@ -155,7 +169,7 @@ if ! git config user.email >/dev/null 2>&1; then
     git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 fi
 
-if [[ ${#PATCH_COMMITS[@]} -eq 0 ]]; then
+if [[ ${#REPLAY[@]} -eq 0 ]]; then
     echo "no patch commits; fast-forwarding ${BRANCH} to ${UPSTREAM_REF}" >&2
     git checkout --quiet --detach "$TAG_SHA"
     git branch --force "$BRANCH" "$TAG_SHA"
@@ -170,14 +184,48 @@ else
     if [[ $RANGE_COUNT -ne ${#PATCH_COMMITS[@]} ]]; then
         die "${BRANCH} interleaves patch and upstream commits (${RANGE_COUNT} commits above ${OLD_BASE}, ${#PATCH_COMMITS[@]} not in any release tag); rebase it by hand"
     fi
-    echo "replaying ${#PATCH_COMMITS[@]} patch commit(s) onto ${UPSTREAM_REF}" >&2
-    if git rebase --onto "$TAG_SHA" "$OLD_BASE" "$BRANCH" >/dev/null 2>&1; then
+    echo "replaying ${#REPLAY[@]} patch commit(s) onto ${UPSTREAM_REF}" >&2
+    # An interactive rebase whose todo list is edited by a script, not a
+    # person: every generated commit's `pick` becomes `drop`.
+    DROP_EDITOR="$(mktemp)"
+    cat >"$DROP_EDITOR" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+todo="$1"
+out="$(mktemp)"
+while IFS= read -r line; do
+    if [[ $line =~ ^pick\ ([0-9a-f]+)\  ]]; then
+        full="$(git rev-parse "${BASH_REMATCH[1]}^{commit}")"
+        if grep -qxF "$full" <<<"$LINUX_SBX_DROP"; then
+            line="drop${line#pick}"
+        fi
+    fi
+    printf '%s\n' "$line"
+done <"$todo" >"$out"
+mv "$out" "$todo"
+EOF
+    chmod +x "$DROP_EDITOR"
+    DROP_LIST="$(printf '%s\n' ${GENERATED[@]+"${GENERATED[@]}"})"
+    # --committer-date-is-author-date: replaying the same patches onto the same
+    # tag gives the same shas on every run, so a re-dispatched week produces
+    # the commit that may already be published instead of a new one.
+    if LINUX_SBX_DROP="$DROP_LIST" GIT_SEQUENCE_EDITOR="$DROP_EDITOR" GIT_EDITOR=true \
+        git -c rebase.abbreviateCommands=false -c rebase.instructionFormat=%s rebase --interactive \
+            --committer-date-is-author-date --onto "$TAG_SHA" "$OLD_BASE" "$BRANCH" >/dev/null 2>&1; then
+        rm -f "$DROP_EDITOR"
         MODE="rebased"
     else
         CONFLICTING=()
         while IFS= read -r path; do
             [[ -n $path ]] && CONFLICTING+=("$path")
         done < <(git diff --name-only --diff-filter=U || true)
+        if [[ ${#CONFLICTING[@]} -eq 0 ]]; then
+            # Not a merge conflict (the todo editor failed, a hook refused...):
+            # do not file it as one.
+            git rebase --abort >/dev/null 2>&1 || true
+            rm -f "$DROP_EDITOR"
+            die "rebase of ${BRANCH} onto ${UPSTREAM_REF} failed without unmerged paths; not a conflict, see the job log"
+        fi
         STATUS_SUMMARY="$(git status --short --branch 2>/dev/null || true)"
         # REBASE_HEAD is the commit whose patch failed to apply. HEAD is still
         # the last commit that applied (the new upstream base), which would name
@@ -194,7 +242,7 @@ else
             echo ""
             echo "- upstream tag: \`${UPSTREAM_REF}\` (${TAG_SHA})"
             echo "- branch: \`${BRANCH}\` (${PREVIOUS_SHA})"
-            echo "- patch commits: ${#PATCH_COMMITS[@]}"
+            echo "- patch commits: ${#REPLAY[@]}"
             if [[ -n $CURRENT_COMMIT ]]; then
                 echo "- stopped at: \`${CURRENT_COMMIT}\` ${CURRENT_SUBJECT}"
             fi
@@ -219,8 +267,9 @@ else
             echo ""
             echo '```'
             echo "git fetch origin ${BRANCH}"
+            echo "git fetch https://github.com/trycua/cua tag ${UPSTREAM_REF}"
             echo "git switch ${BRANCH}"
-            echo "git rebase ${UPSTREAM_REF}    # resolve, then git rebase --continue"
+            echo "git rebase -i ${UPSTREAM_REF}    # drop the Linux-Sbx-Generated commit; resolve, then git rebase --continue"
             echo "git push --force-with-lease origin ${BRANCH}"
             echo '```'
             echo ""
@@ -243,7 +292,7 @@ else
 fi
 
 NEW_SHA="$(git rev-parse "refs/heads/${BRANCH}")"
-PATCH_COUNT="${#PATCH_COMMITS[@]}"
+PATCH_COUNT="${#REPLAY[@]}"
 say "- result: ${MODE}, \`${BRANCH}\` now at \`${NEW_SHA}\` (was \`${PREVIOUS_SHA}\`)"
 
 if [[ $PUSH -eq 1 ]]; then

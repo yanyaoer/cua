@@ -108,8 +108,7 @@ fi
 } >"$NOTES"
 
 # --latest=false: a component prerelease never takes the repository-wide
-# Latest badge. The tag is created with the job token, so it does not start
-# another workflow run.
+# Latest badge.
 gh release create "$TAG" \
     --target "$SOURCE_SHA" \
     --title "$TAG" \
