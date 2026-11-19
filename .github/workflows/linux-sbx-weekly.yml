@@ -278,6 +278,15 @@ jobs:
           restore-keys: |
             rust-linux-sbx-x86_64-
 
+      # The browser-transport tests of this fork's patches (CDP wire layer and
+      # the demultiplexer over it), on the rebased source, before anything is
+      # built for release: a rebase that breaks them fails the run here.
+      - name: Test the browser transport (patch scope)
+        working-directory: libs/cua-driver/rust
+        run: |
+          cargo test --locked -p cua-driver-core --lib browser::
+          cargo test --locked -p cua-driver-core --lib cdp::tests
+
       - name: Build (release)
         working-directory: libs/cua-driver/rust
         env:
