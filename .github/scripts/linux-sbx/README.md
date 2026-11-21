@@ -16,10 +16,11 @@ ruled out, so the push moved to the machine that already holds a login.
 | File | Where | Role |
 | --- | --- | --- |
 | `.github/workflows/linux-sbx-weekly.yml` | Actions | Orchestration only: schedule, permissions, job wiring |
+| `.github/workflows/linux-sbx-macos-check.yml` | Actions | `cargo check` on macOS for pull requests and pushes; see [macOS check](#macos-check) |
 | `select_upstream_tag.sh` | Actions | Highest stable `cua-driver-rs-vX.Y.Z` tag upstream |
 | `next_prerelease_tag.sh` | Actions | `cua-driver-rs-vX.Y.Z-linux-sbx.<N>` candidate, one past the highest published |
 | `rebase_onto_tag.sh` | Actions | Replay the patch commits onto that tag; drops generated commits |
-| `prune_upstream_workflows.sh` | Actions | Generated commit that deletes every workflow except `linux-sbx-weekly.yml` |
+| `prune_upstream_workflows.sh` | Actions | Generated commit that deletes every workflow except this fork's two |
 | `make_source_bundle.sh` | Actions | `git bundle` of the rebased branch (above the tag) and `linux-sbx-metadata.txt` |
 | `metadata.sh` | both | Strict reader for the metadata file (never sourced) |
 | `report_conflict.sh` | Actions | Conflict issue, or an explicit error; always fails the run |
@@ -61,8 +62,8 @@ by hand, with `gh` and `apt-get` replaced by stubs on PATH.
    `Linux-Sbx-Generated:` trailer are dropped; the rest are replayed onto the
    tag. A conflict writes a report, aborts, and fails the job.
 4. **Prune.** One generated commit deletes every file under
-   `.github/workflows/` except `linux-sbx-weekly.yml`. The fork only runs this
-   workflow, and upstream's release and CI workflows must not register here once
+   `.github/workflows/` except `linux-sbx-weekly.yml` and
+   `linux-sbx-macos-check.yml`. The fork only runs these two, and upstream's release and CI workflows must not register here once
    the branch is pushed. The commit is reproducible (bot identity, dates from its
    parent): an unchanged week yields the same sha. It is dropped and regenerated
    by the next rebase, so it never conflicts with upstream's workflow edits.
@@ -82,6 +83,28 @@ by hand, with `gh` and `apt-get` replaced by stubs on PATH.
 Permissions: `contents: read` to check out the branch, `issues: write` only
 for the conflict report, `id-token: write` + `attestations: write` only for the
 signing job. No job has `contents: write`.
+
+## macOS check
+
+The fork ships Linux only, but its patches sit in crates that macOS builds
+too (`cua-driver-core`, `cua-driver`). A Linux build never type-checks the
+`cfg(target_os = "macos")` code, and `cargo check --target
+aarch64-apple-darwin` on Linux stops in dependency build scripts that need
+Swift and the Xcode SDK (`apple-cf`, `apple-metal`, `screencapturekit`,
+`rquickjs-sys`). `linux-sbx-macos-check.yml` runs `cargo check --locked
+--all-targets` for the driver crates on a `macos-26` runner (upstream's macOS
+release runner) instead.
+
+- Triggers: a pull request into `linux-sbx-patch`, a push to it (including
+  the rebased branch `publish_local.sh` pushes), and the Run workflow button.
+- It builds, signs and publishes nothing. The weekly run and
+  `publish_local.sh` never read its result, so a red macOS check never holds
+  back a Linux prerelease. It is the gate for landing a patch: land through a
+  pull request, or push the commit to a branch and open one, and wait for this
+  check before fast-forwarding `linux-sbx-patch`.
+- A separate workflow rather than a job in the weekly one, so pull requests
+  never start a rebase or release build, and
+  `gh run list --workflow linux-sbx-weekly.yml` lists release runs only.
 
 ## Publishing a run (local)
 

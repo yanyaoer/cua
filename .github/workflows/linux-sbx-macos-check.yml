@@ -1,0 +1,80 @@
+name: "Check: macOS still compiles"
+
+# This fork ships Linux only, but its patches live in crates macOS builds too
+# (cua-driver-core, cua-driver). A Linux build cannot type-check the
+# `cfg(target_os = "macos")` code, and a Linux cross check cannot get past the
+# Swift bridges and Xcode SDK the macOS dependencies need. This runs
+# `cargo check` on a macOS runner, which has both, so a patch that breaks the
+# macOS build is seen before merge instead of at the next upstream rebase.
+#
+# It builds nothing, signs nothing and publishes nothing; the weekly workflow
+# and publish_local.sh never read its result. Triggers:
+#
+#   pull_request into linux-sbx-patch   check a patch before it lands
+#   push to linux-sbx-patch             check what landed, including the
+#                                       rebased branch publish_local.sh pushes
+#   workflow_dispatch                   check any ref by hand
+#
+# A separate file, not a job in linux-sbx-weekly.yml, so pull requests never
+# start a rebase or a release build, and `gh run list --workflow
+# linux-sbx-weekly.yml` only lists release runs. prune_upstream_workflows.sh
+# keeps this file next to the weekly one.
+
+on:
+  pull_request:
+    branches: [linux-sbx-patch]
+  push:
+    branches: [linux-sbx-patch]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-sbx-macos-check-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CUA_TELEMETRY: "0"
+  DO_NOT_TRACK: "1"
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  check:
+    name: cargo check (aarch64-apple-darwin)
+    # Same runner as upstream's macOS release job: the Swift bridge in
+    # apple-metal needs the macOS 26 SDK (see cd-rust-cua-driver.yml upstream).
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Same pinned toolchain as the weekly Linux build.
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            libs/cua-driver/rust/target
+          key: rust-linux-sbx-macos-check-${{ hashFiles('libs/cua-driver/rust/Cargo.lock', 'libs/cua-driver/rust/**/Cargo.toml') }}
+          restore-keys: |
+            rust-linux-sbx-macos-check-
+
+      # The packages upstream's macOS release builds; cua-driver pulls in
+      # platform-macos on this target. --all-targets also checks the tests,
+      # where most of this fork's patch code is.
+      - name: cargo check
+        working-directory: libs/cua-driver/rust
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+        run: cargo check --locked --all-targets -p cua-driver -p cua-driver-core -p platform-macos -p cursor-theme-cli -p cua-driver-sdk --target aarch64-apple-darwin

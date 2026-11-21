@@ -127,7 +127,7 @@ jobs:
         id: prune
         run: |
           set -euo pipefail
-          "$SCRIPTS/prune_upstream_workflows.sh" --keep linux-sbx-weekly.yml
+          "$SCRIPTS/prune_upstream_workflows.sh" --keep linux-sbx-weekly.yml --keep linux-sbx-macos-check.yml
 
       - name: Bundle the rebased branch
         env:
