@@ -43,6 +43,7 @@ pub mod binding;
 pub mod cdp_ws;
 pub mod download;
 pub mod engine;
+pub mod ext_bridge;
 mod grant;
 mod input;
 mod keyed_gates;
