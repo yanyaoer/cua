@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Package the rebased branch as a git bundle plus its metadata, for the build
-# job and for publish_local.sh. Nothing is pushed anywhere.
+# step and for whoever publishes the release. Nothing is pushed anywhere.
 #
-#   make_source_bundle.sh --branch linux-sbx-patch --upstream-tag cua-driver-rs-v0.41.3 \
+#   make_source_bundle.sh --branch linux-sbx --upstream-tag cua-driver-rs-v0.41.3 \
 #       --previous-sha <branch sha before the rebase> \
 #       --prerelease-tag cua-driver-rs-v0.41.3-linux-sbx.2 --out DIR \
 #       [--rebase-result rebased] [--patch-commits 3] [--run-id 123] [--repository owner/repo]
@@ -19,7 +19,7 @@
 #   rebase_result  patch_commits  run_id  repository
 #
 # The metadata is data, never sourced: read it with a strict key=value parser
-# (publish_local.sh and checkout_from_bundle.sh do).
+# (checkout_from_bundle.sh and the publish step do).
 set -euo pipefail
 
 BRANCH=""

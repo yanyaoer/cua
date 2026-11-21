@@ -8,7 +8,7 @@
 #    B/source/linux-sbx-metadata.txt (the copy the build checked out against).
 # S: linux-sbx-source.bundle and linux-sbx-metadata.txt from the rebase job.
 # OUT/dist   archives + SHA256SUMS   (what the prerelease ships)
-# OUT/source bundle + metadata       (what publish_local.sh pushes)
+# OUT/source bundle + metadata       (the branch the release was built from)
 #
 # Refuses (exit 1) when the two metadata files differ, the bundle's sha256 is
 # not the recorded one, SHA256SUMS does not verify, or the archives are not
@@ -51,17 +51,3 @@ cp "$B/dist/$STAGE.tar.gz" "$B/dist/$STAGE-binary.tar.gz" "$B/dist/SHA256SUMS" "
 cp "$BUNDLE" "$META" "$OUT/source/"
 find "$OUT" -type f | sort
 
-# The run page tells whoever publishes what to do next.
-SUMMARY="${GITHUB_STEP_SUMMARY:-}"
-if [[ -n $SUMMARY ]]; then
-    {
-        echo "### Ready to publish \`$(bash "$HERE/metadata.sh" "$META" prerelease_tag)\`"
-        echo ""
-        echo "Nothing was pushed or released. From a checkout of this fork:"
-        echo ""
-        echo '```'
-        echo ".github/scripts/linux-sbx/publish_local.sh ${GITHUB_RUN_ID:-<run-id>} --dry-run"
-        echo ".github/scripts/linux-sbx/publish_local.sh ${GITHUB_RUN_ID:-<run-id>}"
-        echo '```'
-    } >>"$SUMMARY"
-fi

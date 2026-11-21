@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Replay the fork's patch commits onto a Cua Driver release tag.
 #
-#   rebase_onto_tag.sh --branch linux-sbx-patch --upstream-ref cua-driver-rs-v0.46.1 \
+#   rebase_onto_tag.sh --branch linux-sbx --upstream-ref cua-driver-rs-v0.46.1 \
 #       --upstream-url https://github.com/trycua/cua --push
 #
 # The patch commits are the commits on --branch that are not reachable from any

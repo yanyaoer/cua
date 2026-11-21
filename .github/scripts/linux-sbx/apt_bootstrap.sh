@@ -63,6 +63,28 @@ apt_bootstrap() {
 }
 
 rm -f "$ROOT/etc/apt/sources.list.d/debian.sources"
+
+# A proxy of deb.debian.org first when given (build hosts with slow egress);
+# signed-by keeps the archive signature check. main and updates come from it
+# (bullseye's current point release); bullseye-security stays on the frozen
+# snapshot: bullseye LTS ended, its security pool was moved to the archive and
+# the proxy's cached index names files that now 404 (trial 2, 2026-11-19).
+# apt picks the highest version across both, so a few security debs still come
+# from snapshot.debian.org.
+if [ -n "${LINUX_SBX_APT_MIRROR:-}" ]; then
+    cat >"$SOURCES" <<EOF
+deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] $LINUX_SBX_APT_MIRROR/debian bullseye main
+deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] $LINUX_SBX_APT_MIRROR/debian bullseye-updates main
+deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://snapshot.debian.org/archive/debian-security/$SNAPSHOT/ bullseye-security main
+EOF
+    if apt_bootstrap; then
+        echo "apt mirror used: $LINUX_SBX_APT_MIRROR"
+        exit 0
+    fi
+    echo "::warning::$LINUX_SBX_APT_MIRROR failed after retries; trying snapshot.debian.org"
+    rm -rf "$LISTS"
+    mkdir -p "$LISTS"
+fi
 cat >"$SOURCES" <<EOF
 deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://snapshot.debian.org/archive/debian/$SNAPSHOT/ bullseye main
 deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://snapshot.debian.org/archive/debian/$SNAPSHOT/ bullseye-updates main
