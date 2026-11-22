@@ -9,7 +9,8 @@
 //! defined by the extension behaviour spec (§5) and its shared frame
 //! samples, a copy of which is in `testdata/ext_bridge/frames.json`.
 //!
-//! - [`frame`] and [`config`] are plain code and build on every platform.
+//! - [`frame`], [`config`] and [`endpoint`] are plain code and build on
+//!   every platform.
 //! - [`host`], [`listener`] and [`peer`] use Unix sockets and `/proc`, and
 //!   exist on Linux only. Asking for host mode on another platform is an
 //!   explicit error ([`run_host_if_requested`]).
@@ -19,6 +20,7 @@
 //! has a bridge config.
 
 pub mod config;
+pub mod endpoint;
 pub mod frame;
 #[cfg(target_os = "linux")]
 pub mod host;
@@ -57,6 +59,7 @@ mod tests {
         let sources = [
             ("mod.rs", include_str!("mod.rs")),
             ("config.rs", include_str!("config.rs")),
+            ("endpoint.rs", include_str!("endpoint.rs")),
             ("frame.rs", include_str!("frame.rs")),
             ("host.rs", include_str!("host.rs")),
             ("listener.rs", include_str!("listener.rs")),
