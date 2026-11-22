@@ -9,16 +9,17 @@
 //! defined by the extension behaviour spec (§5) and its shared frame
 //! samples, a copy of which is in `testdata/ext_bridge/frames.json`.
 //!
-//! - [`frame`], [`config`] and [`endpoint`] are plain code and build on
-//!   every platform.
+//! - [`frame`], [`config`], [`endpoint`] and [`bridge`] are plain code and
+//!   build on every platform; [`bridge::run`] is Linux-only.
 //! - [`host`], [`listener`] and [`peer`] use Unix sockets and `/proc`, and
 //!   exist on Linux only. Asking for host mode on another platform is an
 //!   explicit error ([`run_host_if_requested`]).
 //!
 //! Nothing here starts on its own: `main` routes host-mode argv to
-//! [`run_host_if_requested`]; the listener is started only by a caller that
-//! has a bridge config.
+//! [`run_host_if_requested`] and calls [`bridge::start_from_default_config`],
+//! which starts the listener only when a bridge config file exists.
 
+pub mod bridge;
 pub mod config;
 pub mod endpoint;
 pub mod frame;
@@ -28,6 +29,9 @@ pub mod host;
 pub mod listener;
 #[cfg(target_os = "linux")]
 pub mod peer;
+
+#[cfg(test)]
+mod engine_tests;
 
 /// Runs the native-messaging host when argv asks for it and returns its
 /// exit code; `None` for every other invocation.
@@ -58,6 +62,7 @@ mod tests {
     fn sources_contain_no_deployment_literals() {
         let sources = [
             ("mod.rs", include_str!("mod.rs")),
+            ("bridge.rs", include_str!("bridge.rs")),
             ("config.rs", include_str!("config.rs")),
             ("endpoint.rs", include_str!("endpoint.rs")),
             ("frame.rs", include_str!("frame.rs")),

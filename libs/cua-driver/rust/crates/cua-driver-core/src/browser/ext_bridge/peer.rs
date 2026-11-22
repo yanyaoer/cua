@@ -103,8 +103,9 @@ fn read_stat(proc_root: &Path, pid: i32) -> Option<Stat> {
 }
 
 /// Checks the process `pid` (credentials from `SO_PEERCRED`) against
-/// `policy`.
-pub fn verify_peer(policy: &PeerPolicy, uid: u32, pid: Option<i32>) -> Result<(), PeerRejection> {
+/// `policy` and returns the pid of its parent, the browser process the host
+/// belongs to.
+pub fn verify_peer(policy: &PeerPolicy, uid: u32, pid: Option<i32>) -> Result<i32, PeerRejection> {
     if uid != policy.uid {
         return Err(PeerRejection::UidMismatch {
             expected: policy.uid,
@@ -142,7 +143,7 @@ pub fn verify_peer(policy: &PeerPolicy, uid: u32, pid: Option<i32>) -> Result<()
     if after.start_time != before.start_time || after.ppid != before.ppid {
         return Err(PeerRejection::ProcessChanged { pid });
     }
-    Ok(())
+    Ok(before.ppid)
 }
 
 #[cfg(test)]
@@ -236,7 +237,10 @@ pub(crate) mod tests {
             &proc.browser_bin,
             &["browser", "--no-first-run"],
         );
-        assert_eq!(verify_peer(&proc.policy(UID), UID, Some(PID)), Ok(()));
+        assert_eq!(
+            verify_peer(&proc.policy(UID), UID, Some(PID)),
+            Ok(PARENT_PID)
+        );
     }
 
     #[test]
@@ -245,7 +249,10 @@ pub(crate) mod tests {
         let link = proc.dir.path().join("browser-link");
         std::os::unix::fs::symlink(&proc.browser_bin, &link).unwrap();
         proc.process(PID, &proc.host_bin, 99, &link, &["browser"]);
-        assert_eq!(verify_peer(&proc.policy(UID), UID, Some(PID)), Ok(()));
+        assert_eq!(
+            verify_peer(&proc.policy(UID), UID, Some(PID)),
+            Ok(PARENT_PID)
+        );
     }
 
     #[test]
@@ -305,6 +312,9 @@ pub(crate) mod tests {
             &proc.browser_bin,
             &["browser", "--flag=--type=renderer"],
         );
-        assert_eq!(verify_peer(&proc.policy(UID), UID, Some(PID)), Ok(()));
+        assert_eq!(
+            verify_peer(&proc.policy(UID), UID, Some(PID)),
+            Ok(PARENT_PID)
+        );
     }
 }

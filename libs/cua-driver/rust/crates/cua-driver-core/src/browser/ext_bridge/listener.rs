@@ -58,6 +58,8 @@ pub struct HostSession {
     pub hello: HostHello,
     /// The `session` value sent in `driver_hello`.
     pub session: String,
+    /// The browser process the host was started by (its verified parent).
+    pub browser_pid: i32,
     /// Frames to and from the extension, as JSON text. The receive stream
     /// ends when the host disconnects or is superseded.
     pub wire: Wire,
@@ -202,6 +204,7 @@ pub fn spawn(options: ListenerOptions) -> std::io::Result<ListenerHandle> {
 struct Verified {
     stream: UnixStream,
     hello: HostHello,
+    browser_pid: i32,
 }
 
 async fn accept_loop(
@@ -275,8 +278,13 @@ async fn handshake(mut stream: UnixStream, policy: &PeerPolicy) -> Result<Verifi
             cred.pid()
         ));
     }
-    verify_peer(policy, cred.uid(), cred.pid()).map_err(|rejection| rejection.to_string())?;
-    Ok(Verified { stream, hello })
+    let browser_pid =
+        verify_peer(policy, cred.uid(), cred.pid()).map_err(|rejection| rejection.to_string())?;
+    Ok(Verified {
+        stream,
+        hello,
+        browser_pid,
+    })
 }
 
 struct ActiveGuard(Arc<AtomicUsize>);
@@ -296,7 +304,12 @@ async fn register(
 ) {
     let mut current: Option<(oneshot::Sender<()>, tokio::task::JoinHandle<()>)> = None;
     let mut counter: u64 = 0;
-    while let Some(Verified { mut stream, hello }) = verified.recv().await {
+    while let Some(Verified {
+        mut stream,
+        hello,
+        browser_pid,
+    }) = verified.recv().await
+    {
         if let Some((close, mut pump)) = current.take() {
             let _ = close.send(());
             if tokio::time::timeout(SUPERSEDE_GRACE, &mut pump)
@@ -340,6 +353,7 @@ async fn register(
         let host = HostSession {
             hello,
             session,
+            browser_pid,
             wire: Wire {
                 sender: Box::new(SocketSender(out_tx)),
                 receiver,

@@ -267,6 +267,9 @@ fn build_driver(
     cursor: cursor_overlay::CursorConfig,
     host_owns_permission_ux: bool,
 ) -> Result<Arc<cua_driver_sdk::CuaDriver>, cua_driver_sdk::DriverError> {
+    // linux-sbx: the extension bridge listens only where a config file exists.
+    #[cfg(target_os = "linux")]
+    cua_driver_core::browser::ext_bridge::bridge::start_from_default_config();
     cua_driver_sdk::CuaDriver::try_create_service_for_host(cua_driver_sdk::DriverHostOptions {
         cursor,
         host_owns_permission_ux,

@@ -778,8 +778,10 @@ impl CdpPool {
         ws_url: &str,
         generation: u64,
     ) -> anyhow::Result<Arc<CdpConnection>> {
-        loopback_port(ws_url)
-            .ok_or_else(|| anyhow::anyhow!("existing-profile endpoint has no loopback port"))?;
+        if !super::ext_bridge::bridge::is_bridge_url(ws_url) {
+            loopback_port(ws_url)
+                .ok_or_else(|| anyhow::anyhow!("existing-profile endpoint has no loopback port"))?;
+        }
         let _dial = self.inner.dial_gate.lock().await;
         {
             let now = Instant::now();
@@ -821,8 +823,11 @@ impl CdpPool {
         // using their sockets and revocation stays responsive. The browser
         // answers the handshake only once its prompt is approved, so the dial
         // must outlive a person's answer; `browser_prepare` bounds the wait.
-        let conn =
-            Arc::new(CdpConnection::connect_within(ws_url, CONSENT_HANDSHAKE_TIMEOUT).await?);
+        let conn = if super::ext_bridge::bridge::is_bridge_url(ws_url) {
+            super::ext_bridge::bridge::dial(ws_url, true).await?
+        } else {
+            Arc::new(CdpConnection::connect_within(ws_url, CONSENT_HANDSHAKE_TIMEOUT).await?)
+        };
         conn.restrict_to_existing_profile();
         let mut conns = self.inner.conns.lock().await;
         self.inner.insert_shared(
@@ -894,7 +899,11 @@ impl CdpPool {
 
         // See claim_existing: never hold the entry mutex across a dial that
         // can wait for browser-owned consent UI.
-        let conn = Arc::new(CdpConnection::connect(ws_url).await?);
+        let conn = if super::ext_bridge::bridge::is_bridge_url(ws_url) {
+            super::ext_bridge::bridge::dial(ws_url, false).await?
+        } else {
+            Arc::new(CdpConnection::connect(ws_url).await?)
+        };
         conn.restrict_to_existing_profile();
         let mut conns = self.inner.conns.lock().await;
         // Holders of the dead socket rebind through their own reconnect,

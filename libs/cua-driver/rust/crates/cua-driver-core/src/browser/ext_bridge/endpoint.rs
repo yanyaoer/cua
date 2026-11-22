@@ -18,9 +18,8 @@
 //!   on the tab's session, and `tab.detached` / `tab.closed` become
 //!   `Target.detachedFromTarget`.
 //!
-//! Nothing in the run path imports this module yet: [`connect`] is called
-//! by a later segment that starts the listener and routes a verified host
-//! session through it.
+//! [`super::bridge`] calls [`connect`] for every verified host session; the
+//! engine reaches the connection through the bridge's endpoint URL.
 //!
 //! Invariants that hold here:
 //! - Every CDP method the driver may send is already checked against the
@@ -88,11 +87,11 @@ pub struct EndpointOptions {
     pub file_access: bool,
 }
 
-/// One translated CDP connection plus the state tests inspect.
+/// One translated CDP connection plus the bridge-level requests that have
+/// no CDP counterpart (`ping`, `tab.open`). Clones share the connection.
+#[derive(Clone)]
 pub struct Endpoint {
     conn: Arc<CdpConnection>,
-    /// Read by the test-only inspector; the run path talks to `conn`.
-    #[allow(dead_code)]
     state: Arc<State>,
 }
 
@@ -101,6 +100,49 @@ impl Endpoint {
     /// [`CdpMethodPolicy::ExistingProfile`] from the start.
     pub fn connection(&self) -> &Arc<CdpConnection> {
         &self.conn
+    }
+
+    /// Whether the host session behind this endpoint has ended.
+    pub fn is_closed(&self) -> bool {
+        self.state.closed.load(Ordering::SeqCst) || self.conn.is_closed()
+    }
+
+    /// The extension's `ping` result (spec §6), used for the bridge status.
+    pub async fn ping(&self) -> Result<Value, String> {
+        self.state
+            .request("ping", None, None)
+            .await
+            .map_err(|failure| failure.to_string())
+    }
+
+    /// Opens one owned `about:blank` tab when the extension owns none
+    /// (design question 2): the extension can drive only tabs it opened, and
+    /// no upstream tool opens one. Returns the new tab, or `None` when an
+    /// owned tab already existed. The tab is active so screenshots see it.
+    pub async fn ensure_owned_tab(&self) -> Result<Option<u64>, String> {
+        let tabs = self
+            .state
+            .tab_list()
+            .await
+            .map_err(|failure| failure.to_string())?;
+        if !tabs.is_empty() {
+            return Ok(None);
+        }
+        let opened = self
+            .state
+            .request(
+                "tab.open",
+                None,
+                Some(json!({"url": "about:blank", "active": true})),
+            )
+            .await
+            .map_err(|failure| failure.to_string())?;
+        let tab = opened
+            .get("tab")
+            .and_then(Value::as_u64)
+            .or_else(|| opened.as_u64())
+            .ok_or_else(|| "tab.open returned no tab id".to_owned())?;
+        Ok(Some(tab))
     }
 
     /// Extension requests still waiting for a `res`.

@@ -172,6 +172,8 @@ pub enum EndpointTransport {
     #[default]
     LegacyJsonVersion,
     EmbeddedDescendant,
+    /// A browser extension reached through its native host (linux-sbx).
+    ExtensionBridge,
 }
 
 /// Core's authorization verdict for a bound endpoint.

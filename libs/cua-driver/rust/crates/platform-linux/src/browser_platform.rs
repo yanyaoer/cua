@@ -551,6 +551,9 @@ async fn browser_websocket_url(port: u16) -> Option<String> {
 #[async_trait]
 impl BrowserPlatform for LinuxBrowserPlatform {
     fn isolated_browser_executable(&self) -> Result<String, BrowserRefusal> {
+        if let Some(bridge) = cua_driver_core::browser::ext_bridge::bridge::installed() {
+            return Err(bridge.hook_isolated_launch());
+        }
         for candidate in isolated_browser_candidates() {
             let Ok(executable) = select_isolated_browser_executable([candidate]) else {
                 continue;
@@ -931,6 +934,9 @@ impl BrowserPlatform for LinuxBrowserPlatform {
         &self,
         pid: i64,
     ) -> Result<Option<OwnedEndpoint>, BrowserRefusal> {
+        if let Some(bridge) = cua_driver_core::browser::ext_bridge::bridge::installed() {
+            return bridge.hook_discover_owned();
+        }
         let ports = tokio::task::spawn_blocking(move || loopback_ports_for_pid(pid))
             .await
             .map_err(|error| {
@@ -961,6 +967,9 @@ impl BrowserPlatform for LinuxBrowserPlatform {
         &self,
         pid: i64,
     ) -> Result<Option<OwnedEndpoint>, BrowserRefusal> {
+        if let Some(bridge) = cua_driver_core::browser::ext_bridge::bridge::installed() {
+            return bridge.hook_discover_existing(pid);
+        }
         if let Some(endpoint) = active_port_endpoint(pid)? {
             return Ok(Some(endpoint));
         }
@@ -1003,6 +1012,9 @@ impl BrowserPlatform for LinuxBrowserPlatform {
         pid: i64,
         expected_ws_url: &str,
     ) -> Result<Option<OwnedEndpoint>, BrowserRefusal> {
+        if let Some(bridge) = cua_driver_core::browser::ext_bridge::bridge::installed() {
+            return bridge.hook_reprove_existing(pid, expected_ws_url);
+        }
         let Some(port) = loopback_websocket_port(expected_ws_url) else {
             return Err(BrowserRefusal::new(
                 BrowserRefusalCode::BrowserEndpointOwnerMismatch,
@@ -1046,6 +1058,9 @@ impl BrowserPlatform for LinuxBrowserPlatform {
         &self,
         request: ExistingProfileSetupRequest,
     ) -> Result<ExistingProfileSetupOutcome, BrowserRefusal> {
+        if let Some(bridge) = cua_driver_core::browser::ext_bridge::bridge::installed() {
+            return Err(bridge.hook_setup_existing());
+        }
         let descriptor = existing_profile_setup_descriptor(request.browser).ok_or_else(|| {
             BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
@@ -1707,5 +1722,59 @@ mod tests {
             browser_product("/opt/google/chrome/chrome"),
             BrowserProduct::GoogleChrome
         );
+    }
+}
+
+/// The linux-sbx extension bridge (ADR D1): while a bridge config exists,
+/// every method below must hand over to the bridge before any port scan,
+/// `DevToolsActivePort` read, settings-UI setup or isolated launch runs. A
+/// rebase that drops or moves a hook fails here.
+#[cfg(test)]
+mod ext_bridge_hook_tests {
+    const HOOKS: [(&str, &str); 5] = [
+        ("fn isolated_browser_executable(", "hook_isolated_launch()"),
+        ("async fn discover_owned_endpoint(", "hook_discover_owned()"),
+        (
+            "async fn discover_existing_profile_endpoint(",
+            "hook_discover_existing(pid)",
+        ),
+        (
+            "async fn reprove_existing_profile_endpoint(",
+            "hook_reprove_existing(pid, expected_ws_url)",
+        ),
+        (
+            "async fn setup_existing_profile_endpoint(",
+            "hook_setup_existing()",
+        ),
+    ];
+
+    #[test]
+    fn every_devtools_path_starts_with_the_bridge_hook() {
+        let source = include_str!("browser_platform.rs");
+        let implementation = source
+            .split("impl BrowserPlatform for LinuxBrowserPlatform")
+            .nth(1)
+            .expect("LinuxBrowserPlatform implements BrowserPlatform");
+        for (signature, hook) in HOOKS {
+            let start = implementation
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is missing"));
+            let body_start = start + implementation[start..].find("{\n").expect("method body") + 2;
+            let first_lines: Vec<&str> = implementation[body_start..]
+                .lines()
+                .map(str::trim)
+                .take(3)
+                .collect();
+            assert_eq!(
+                first_lines[0],
+                "if let Some(bridge) = cua_driver_core::browser::ext_bridge::bridge::installed() {",
+                "{signature} must start with the bridge hook"
+            );
+            assert!(
+                first_lines[1].contains(hook),
+                "{signature} must return {hook}, found {:?}",
+                first_lines[1]
+            );
+        }
     }
 }
