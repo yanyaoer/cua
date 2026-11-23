@@ -43,6 +43,7 @@ pub mod binding;
 pub mod cdp_ws;
 pub mod download;
 pub mod engine;
+pub mod ext_bridge;
 mod grant;
 mod input;
 mod keyed_gates;
@@ -63,6 +64,7 @@ pub mod tools;
 pub mod types;
 #[cfg(test)]
 mod v2_tests;
+pub mod wire;
 
 pub use adapter_support::{
     fetch_json_version_ws_url, is_electron_app_layout, is_firefox, loopback_websocket_port,

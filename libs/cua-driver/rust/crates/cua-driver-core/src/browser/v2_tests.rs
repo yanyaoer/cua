@@ -240,7 +240,7 @@ fn screenshot_png_base64(width: u32, height: u32) -> String {
     BASE64.encode(encoded.into_inner())
 }
 
-type SharedState = Arc<StdMutex<FixtureState>>;
+pub(super) type SharedState = Arc<StdMutex<FixtureState>>;
 
 /// Main-frame document: a plain button, an open shadow root with an
 /// input, a user-agent shadow root (must be skipped), a same-process
@@ -549,7 +549,7 @@ fn oopif_document() -> Value {
     })
 }
 
-fn fixture_handler(state: SharedState) -> MockHandler {
+pub(super) fn fixture_handler(state: SharedState) -> MockHandler {
     Arc::new(move |call| {
         let mut st = state.lock().unwrap();
         st.calls.push((

@@ -14,21 +14,27 @@
 //!
 //! Only loopback `ws://` URLs are accepted: the endpoint is a local
 //! browser the platform adapter proved we own, never a remote service.
+//!
+//! The demultiplexer runs over a [`Wire`] (send one text frame, receive an
+//! ordered stream of text frames). [`CdpConnection::connect`] builds the
+//! loopback WebSocket wire; [`CdpConnection::from_wire`] accepts any other.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-use futures_util::stream::{SplitSink, SplitStream};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde_json::Value;
-use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+use super::wire::{Wire, WireReceiver, WireSender};
+
+// The WebSocket tests below drive a raw tungstenite peer through `super::*`.
+#[cfg(test)]
+use futures_util::SinkExt;
+#[cfg(test)]
+use tokio_tungstenite::tungstenite::Message;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -167,18 +173,10 @@ impl Demux {
 }
 
 /// The reader task: routes replies by id, fans events out to
-/// subscribers, and fails everything on socket close.
-async fn read_loop(mut read: SplitStream<WsStream>, demux: Arc<Demux>) {
-    loop {
-        let frame = match read.next().await {
-            Some(Ok(frame)) => frame,
-            Some(Err(_)) | None => break,
-        };
-        let text = match frame {
-            Message::Text(t) => t,
-            Message::Close(_) => break,
-            _ => continue,
-        };
+/// subscribers, and fails everything on socket close (the wire's receive
+/// stream ending).
+async fn read_loop(mut read: WireReceiver, demux: Arc<Demux>) {
+    while let Some(text) = read.next().await {
         let v: Value = match serde_json::from_str(&text) {
             Ok(v) => v,
             Err(_) => continue,
@@ -276,7 +274,7 @@ async fn read_loop(mut read: SplitStream<WsStream>, demux: Arc<Demux>) {
 
 /// A single browser-endpoint connection.
 pub struct CdpConnection {
-    writer: Mutex<SplitSink<WsStream, Message>>,
+    writer: Box<dyn WireSender>,
     demux: Arc<Demux>,
     next_id: AtomicU64,
     existing_profile_policy: AtomicBool,
@@ -300,7 +298,13 @@ impl CdpConnection {
         let (ws, _resp) = tokio::time::timeout(timeout, tokio_tungstenite::connect_async(ws_url))
             .await
             .map_err(|_| anyhow::anyhow!("CDP connect to {ws_url} timed out"))??;
-        let (write, read) = ws.split();
+        Ok(Self::from_wire(super::wire::websocket::wire(ws)))
+    }
+
+    /// A connection over an already-established [`Wire`]. Must be called
+    /// within a tokio runtime: it spawns the connection's reader task.
+    pub fn from_wire(wire: Wire) -> Self {
+        let Wire { sender, receiver } = wire;
         let demux = Arc::new(Demux {
             pending: StdMutex::new(HashMap::new()),
             subscribers: StdMutex::new(Vec::new()),
@@ -310,14 +314,20 @@ impl CdpConnection {
             next_dialog_generation: AtomicU64::new(1),
             closed: AtomicBool::new(false),
         });
-        let reader = tokio::spawn(read_loop(read, demux.clone()));
-        Ok(Self {
-            writer: Mutex::new(write),
+        let reader = tokio::spawn(read_loop(receiver, demux.clone()));
+        Self {
+            writer: sender,
             demux,
             next_id: AtomicU64::new(1),
             existing_profile_policy: AtomicBool::new(false),
             reader,
-        })
+        }
+    }
+
+    /// Calls still waiting for a reply.
+    #[cfg(test)]
+    pub(crate) fn pending_len(&self) -> usize {
+        self.demux.pending.lock().unwrap().len()
     }
 
     pub fn method_policy(&self) -> CdpMethodPolicy {
@@ -464,10 +474,7 @@ impl CdpConnection {
         if let Some(sid) = session_id {
             msg["sessionId"] = Value::String(sid.to_owned());
         }
-        let sent = {
-            let mut writer = self.writer.lock().await;
-            writer.send(Message::Text(msg.to_string())).await
-        };
+        let sent = self.writer.send_text(msg.to_string()).await;
         if let Err(e) = sent {
             self.demux.pending.lock().unwrap().remove(&id);
             anyhow::bail!("CDP send failed during {method}: {e}");
@@ -771,8 +778,10 @@ impl CdpPool {
         ws_url: &str,
         generation: u64,
     ) -> anyhow::Result<Arc<CdpConnection>> {
-        loopback_port(ws_url)
-            .ok_or_else(|| anyhow::anyhow!("existing-profile endpoint has no loopback port"))?;
+        if !super::ext_bridge::bridge::is_bridge_url(ws_url) {
+            loopback_port(ws_url)
+                .ok_or_else(|| anyhow::anyhow!("existing-profile endpoint has no loopback port"))?;
+        }
         let _dial = self.inner.dial_gate.lock().await;
         {
             let now = Instant::now();
@@ -814,8 +823,11 @@ impl CdpPool {
         // using their sockets and revocation stays responsive. The browser
         // answers the handshake only once its prompt is approved, so the dial
         // must outlive a person's answer; `browser_prepare` bounds the wait.
-        let conn =
-            Arc::new(CdpConnection::connect_within(ws_url, CONSENT_HANDSHAKE_TIMEOUT).await?);
+        let conn = if super::ext_bridge::bridge::is_bridge_url(ws_url) {
+            super::ext_bridge::bridge::dial(ws_url, true).await?
+        } else {
+            Arc::new(CdpConnection::connect_within(ws_url, CONSENT_HANDSHAKE_TIMEOUT).await?)
+        };
         conn.restrict_to_existing_profile();
         let mut conns = self.inner.conns.lock().await;
         self.inner.insert_shared(
@@ -887,7 +899,11 @@ impl CdpPool {
 
         // See claim_existing: never hold the entry mutex across a dial that
         // can wait for browser-owned consent UI.
-        let conn = Arc::new(CdpConnection::connect(ws_url).await?);
+        let conn = if super::ext_bridge::bridge::is_bridge_url(ws_url) {
+            super::ext_bridge::bridge::dial(ws_url, false).await?
+        } else {
+            Arc::new(CdpConnection::connect(ws_url).await?)
+        };
         conn.restrict_to_existing_profile();
         let mut conns = self.inner.conns.lock().await;
         // Holders of the dead socket rebind through their own reconnect,

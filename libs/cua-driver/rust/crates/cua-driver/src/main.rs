@@ -267,6 +267,9 @@ fn build_driver(
     cursor: cursor_overlay::CursorConfig,
     host_owns_permission_ux: bool,
 ) -> Result<Arc<cua_driver_sdk::CuaDriver>, cua_driver_sdk::DriverError> {
+    // linux-sbx: the extension bridge listens only where a config file exists.
+    #[cfg(target_os = "linux")]
+    cua_driver_core::browser::ext_bridge::bridge::start_from_default_config();
     cua_driver_sdk::CuaDriver::try_create_service_for_host(cua_driver_sdk::DriverHostOptions {
         cursor,
         host_owns_permission_ux,
@@ -947,6 +950,11 @@ fn main() {
 #[cfg(not(target_os = "macos"))]
 fn main() -> anyhow::Result<()> {
     cua_driver_core::build_info::init(env!("CUA_DRIVER_GIT_SHA"));
+    // Chrome starts the browser-extension native host as this binary; its
+    // stdout carries frames only, so it runs before logging and telemetry.
+    if let Some(code) = cua_driver_core::browser::ext_bridge::run_host_if_requested() {
+        std::process::exit(code);
+    }
     // An elevated Driver runs shell launches through this executable with a
     // standard-user token (#3607). Checked first so the helper does no other
     // Driver work.

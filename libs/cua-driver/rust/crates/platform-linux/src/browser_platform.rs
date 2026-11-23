@@ -551,6 +551,9 @@ async fn browser_websocket_url(port: u16) -> Option<String> {
 #[async_trait]
 impl BrowserPlatform for LinuxBrowserPlatform {
     fn isolated_browser_executable(&self) -> Result<String, BrowserRefusal> {
+        if let Some(bridge) = cua_driver_core::browser::ext_bridge::bridge::installed() {
+            return Err(bridge.hook_isolated_launch());
+        }
         for candidate in isolated_browser_candidates() {
             let Ok(executable) = select_isolated_browser_executable([candidate]) else {
                 continue;
@@ -931,6 +934,9 @@ impl BrowserPlatform for LinuxBrowserPlatform {
         &self,
         pid: i64,
     ) -> Result<Option<OwnedEndpoint>, BrowserRefusal> {
+        if let Some(bridge) = cua_driver_core::browser::ext_bridge::bridge::installed() {
+            return bridge.hook_discover_owned();
+        }
         let ports = tokio::task::spawn_blocking(move || loopback_ports_for_pid(pid))
             .await
             .map_err(|error| {
@@ -961,6 +967,9 @@ impl BrowserPlatform for LinuxBrowserPlatform {
         &self,
         pid: i64,
     ) -> Result<Option<OwnedEndpoint>, BrowserRefusal> {
+        if let Some(bridge) = cua_driver_core::browser::ext_bridge::bridge::installed() {
+            return bridge.hook_discover_existing(pid);
+        }
         if let Some(endpoint) = active_port_endpoint(pid)? {
             return Ok(Some(endpoint));
         }
@@ -1003,6 +1012,9 @@ impl BrowserPlatform for LinuxBrowserPlatform {
         pid: i64,
         expected_ws_url: &str,
     ) -> Result<Option<OwnedEndpoint>, BrowserRefusal> {
+        if let Some(bridge) = cua_driver_core::browser::ext_bridge::bridge::installed() {
+            return bridge.hook_reprove_existing(pid, expected_ws_url);
+        }
         let Some(port) = loopback_websocket_port(expected_ws_url) else {
             return Err(BrowserRefusal::new(
                 BrowserRefusalCode::BrowserEndpointOwnerMismatch,
@@ -1046,6 +1058,9 @@ impl BrowserPlatform for LinuxBrowserPlatform {
         &self,
         request: ExistingProfileSetupRequest,
     ) -> Result<ExistingProfileSetupOutcome, BrowserRefusal> {
+        if let Some(bridge) = cua_driver_core::browser::ext_bridge::bridge::installed() {
+            return Err(bridge.hook_setup_existing());
+        }
         let descriptor = existing_profile_setup_descriptor(request.browser).ok_or_else(|| {
             BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
@@ -1707,5 +1722,183 @@ mod tests {
             browser_product("/opt/google/chrome/chrome"),
             BrowserProduct::GoogleChrome
         );
+    }
+}
+
+/// The linux-sbx extension bridge (ADR D1): while a bridge config exists,
+/// every method below that can reach a DevTools port must hand over to the
+/// bridge before any port scan, `DevToolsActivePort` read, settings-UI setup
+/// or isolated launch runs. The weekly rebase builds on whatever upstream
+/// wrote here, so these tests check the adapter itself: a dropped or moved
+/// hook, a new method nobody classified, or a port path in a method listed as
+/// not needing a hook fails the release gate.
+#[cfg(test)]
+mod ext_bridge_hook_tests {
+    const HOOK: &str =
+        "if let Some(bridge) = cua_driver_core::browser::ext_bridge::bridge::installed() {";
+
+    /// Methods that must start with the bridge hook, and the hook's call.
+    const HOOKED: [(&str, &str); 5] = [
+        ("isolated_browser_executable", "hook_isolated_launch()"),
+        ("discover_owned_endpoint", "hook_discover_owned()"),
+        (
+            "discover_existing_profile_endpoint",
+            "hook_discover_existing(pid)",
+        ),
+        (
+            "reprove_existing_profile_endpoint",
+            "hook_reprove_existing(pid, expected_ws_url)",
+        ),
+        ("setup_existing_profile_endpoint", "hook_setup_existing()"),
+    ];
+
+    /// Methods that need no hook, and why. Adding a name here is a review of
+    /// that method against ADR D1, not a way to quiet the test.
+    const NO_HOOK: [(&str, &str); 13] = [
+        (
+            "managed_extension_policy",
+            "reads policy only; the launch it feeds is refused",
+        ),
+        (
+            "standalone_trusted_input_background_limitation",
+            "a constant",
+        ),
+        ("visualize_browser_action", "cursor overlay"),
+        ("classify_browser", "process identity"),
+        ("native_window", "window identity"),
+        ("is_only_exact_native_window", "window identity"),
+        (
+            "commit_existing_profile_setup",
+            "runs only after a setup, which is refused",
+        ),
+        (
+            "cleanup_existing_profile_setup",
+            "turns the setting off, never on",
+        ),
+        (
+            "abort_existing_profile_setup",
+            "runs only after a setup, which is refused",
+        ),
+        (
+            "dismiss_abandoned_existing_profile_consent",
+            "closes a prompt",
+        ),
+        (
+            "handle_existing_profile_consent",
+            "a port dial's prompt; bridge dials have none",
+        ),
+        ("process_fingerprint", "process identity"),
+        (
+            "prepare_endpoint",
+            "reaches ports only through discover_owned_endpoint",
+        ),
+    ];
+
+    /// Calls that scan, read or open a DevTools port.
+    const PORT_PATHS: [&str; 7] = [
+        "loopback_ports_for_pid(",
+        "active_port_endpoint(",
+        "browser_websocket_url(",
+        "DevToolsActivePort",
+        "browser_setup_ui::enable(",
+        "isolated_browser_candidates(",
+        "remote-debugging",
+    ];
+
+    /// (name, body) of every method of the adapter's BrowserPlatform impl.
+    fn methods() -> Vec<(String, String)> {
+        let source = include_str!("browser_platform.rs");
+        let implementation = source
+            .split("impl BrowserPlatform for LinuxBrowserPlatform {\n")
+            .nth(1)
+            .expect("LinuxBrowserPlatform implements BrowserPlatform")
+            .split("\n}\n")
+            .next()
+            .unwrap();
+        let mut methods: Vec<(String, String)> = Vec::new();
+        for line in implementation.lines() {
+            let signature = line
+                .strip_prefix("    async fn ")
+                .or_else(|| line.strip_prefix("    fn "));
+            if let Some(signature) = signature {
+                let name = signature
+                    .split(|c: char| c == '(' || c == '<')
+                    .next()
+                    .unwrap()
+                    .to_owned();
+                // The signature is part of the body text: its `{` ends it.
+                methods.push((name, format!("{line}\n")));
+            } else if let Some((_, body)) = methods.last_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        assert!(
+            methods.len() >= HOOKED.len(),
+            "no methods found: {methods:?}"
+        );
+        methods
+    }
+
+    #[test]
+    fn every_devtools_path_starts_with_the_bridge_hook() {
+        let methods = methods();
+        for (name, hook) in HOOKED {
+            let (_, body) = methods
+                .iter()
+                .find(|(method, _)| method == name)
+                .unwrap_or_else(|| panic!("{name} is missing"));
+            let body = body
+                .split_once("{\n")
+                .map_or(body.as_str(), |(_, rest)| rest);
+            let first_lines: Vec<&str> = body.lines().map(str::trim).take(2).collect();
+            assert_eq!(
+                first_lines[0], HOOK,
+                "{name} must start with the bridge hook"
+            );
+            assert!(
+                first_lines[1].contains(hook),
+                "{name} must return {hook}, found {:?}",
+                first_lines[1]
+            );
+        }
+    }
+
+    #[test]
+    fn every_method_is_classified() {
+        let known: Vec<&str> = HOOKED
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(NO_HOOK.iter().map(|(name, _)| *name))
+            .collect();
+        let names: Vec<String> = methods().into_iter().map(|(name, _)| name).collect();
+        for name in &names {
+            assert!(
+                known.contains(&name.as_str()),
+                "{name} is new in LinuxBrowserPlatform: decide whether it can reach a DevTools \
+                 port (ADR D1); add it to HOOKED with a bridge hook or to NO_HOOK with the reason"
+            );
+        }
+        for name in known {
+            assert!(
+                names.iter().any(|method| method == name),
+                "{name} is no longer in LinuxBrowserPlatform: remove it from these lists"
+            );
+        }
+    }
+
+    #[test]
+    fn no_unhooked_method_reaches_a_port_path() {
+        for (name, body) in methods() {
+            if HOOKED.iter().any(|(hooked, _)| *hooked == name) {
+                continue;
+            }
+            for marker in PORT_PATHS {
+                assert!(
+                    !body.contains(marker),
+                    "{name} calls {marker:?} without the bridge hook (ADR D1)"
+                );
+            }
+        }
     }
 }
