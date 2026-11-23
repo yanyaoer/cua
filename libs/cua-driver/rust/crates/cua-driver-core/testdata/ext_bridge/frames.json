@@ -1,0 +1,241 @@
+{
+  "version": 1,
+  "byte_order": "little-endian (x86_64 / arm64 Linux native order)",
+  "valid": [
+    {
+      "name": "hello",
+      "json": {
+        "v": 1,
+        "t": "hello",
+        "proto": 1,
+        "ext": "0.1.0",
+        "instance": "AAAAAAAAAAAAAAAAAAAAAA",
+        "file_access": true
+      },
+      "length": 98,
+      "hex": "620000007b2276223a312c2274223a2268656c6c6f222c2270726f746f223a312c22657874223a22302e312e30222c22696e7374616e6365223a2241414141414141414141414141414141414141414141222c2266696c655f616363657373223a747275657d"
+    },
+    {
+      "name": "hello_last_error",
+      "json": {
+        "v": 1,
+        "t": "hello",
+        "proto": 1,
+        "ext": "0.1.0",
+        "instance": "AAAAAAAAAAAAAAAAAAAAAA",
+        "file_access": false,
+        "last_error": "Native host has exited."
+      },
+      "length": 138,
+      "hex": "8a0000007b2276223a312c2274223a2268656c6c6f222c2270726f746f223a312c22657874223a22302e312e30222c22696e7374616e6365223a2241414141414141414141414141414141414141414141222c2266696c655f616363657373223a66616c73652c226c6173745f6572726f72223a224e617469766520686f737420686173206578697465642e227d"
+    },
+    {
+      "name": "welcome",
+      "json": {
+        "v": 1,
+        "t": "welcome",
+        "proto": 1,
+        "host": "0.1.0",
+        "session": "s1",
+        "config": {
+          "upload_roots": [
+            "/home/user/Uploads/muse"
+          ],
+          "nav_schemes": [
+            "http",
+            "https",
+            "about"
+          ]
+        }
+      },
+      "length": 154,
+      "hex": "9a0000007b2276223a312c2274223a2277656c636f6d65222c2270726f746f223a312c22686f7374223a22302e312e30222c2273657373696f6e223a227331222c22636f6e666967223a7b2275706c6f61645f726f6f7473223a5b222f686f6d652f757365722f55706c6f6164732f6d757365225d2c226e61765f736368656d6573223a5b2268747470222c226874747073222c2261626f7574225d7d7d"
+    },
+    {
+      "name": "bye_superseded",
+      "json": {
+        "v": 1,
+        "t": "bye",
+        "reason": "superseded"
+      },
+      "length": 39,
+      "hex": "270000007b2276223a312c2274223a22627965222c22726561736f6e223a2273757065727365646564227d"
+    },
+    {
+      "name": "req_cdp",
+      "json": {
+        "v": 1,
+        "t": "req",
+        "id": 7,
+        "op": "cdp",
+        "tab": 12,
+        "params": {
+          "method": "Page.navigate",
+          "params": {
+            "url": "https://example.com/"
+          }
+        }
+      },
+      "length": 120,
+      "hex": "780000007b2276223a312c2274223a22726571222c226964223a372c226f70223a22636470222c22746162223a31322c22706172616d73223a7b226d6574686f64223a22506167652e6e61766967617465222c22706172616d73223a7b2275726c223a2268747470733a2f2f6578616d706c652e636f6d2f227d7d7d"
+    },
+    {
+      "name": "res_ok",
+      "json": {
+        "v": 1,
+        "t": "res",
+        "id": 7,
+        "ok": true,
+        "result": {
+          "frameId": "F1",
+          "loaderId": "L1"
+        }
+      },
+      "length": 76,
+      "hex": "4c0000007b2276223a312c2274223a22726573222c226964223a372c226f6b223a747275652c22726573756c74223a7b226672616d654964223a224631222c226c6f616465724964223a224c31227d7d"
+    },
+    {
+      "name": "res_not_owned",
+      "json": {
+        "v": 1,
+        "t": "res",
+        "id": 8,
+        "ok": false,
+        "error": {
+          "code": "not_owned",
+          "message": "tab is not owned by this extension"
+        }
+      },
+      "length": 111,
+      "hex": "6f0000007b2276223a312c2274223a22726573222c226964223a382c226f6b223a66616c73652c226572726f72223a7b22636f6465223a226e6f745f6f776e6564222c226d657373616765223a22746162206973206e6f74206f776e6564206279207468697320657874656e73696f6e227d7d"
+    },
+    {
+      "name": "res_cdp_error",
+      "json": {
+        "v": 1,
+        "t": "res",
+        "id": 9,
+        "ok": false,
+        "error": {
+          "code": "cdp_error",
+          "message": "Chrome returned an error",
+          "cdp": {
+            "code": -32000,
+            "message": "Cannot navigate to invalid URL"
+          }
+        }
+      },
+      "length": 166,
+      "hex": "a60000007b2276223a312c2274223a22726573222c226964223a392c226f6b223a66616c73652c226572726f72223a7b22636f6465223a226364705f6572726f72222c226d657373616765223a224368726f6d652072657475726e656420616e206572726f72222c22636470223a7b22636f6465223a2d33323030302c226d657373616765223a2243616e6e6f74206e6176696761746520746f20696e76616c69642055524c227d7d7d"
+    },
+    {
+      "name": "evt_dialog",
+      "json": {
+        "v": 1,
+        "t": "evt",
+        "ev": "cdp.event",
+        "tab": 12,
+        "method": "Page.javascriptDialogOpening",
+        "params": {
+          "type": "confirm",
+          "message": "ok?"
+        }
+      },
+      "length": 127,
+      "hex": "7f0000007b2276223a312c2274223a22657674222c226576223a226364702e6576656e74222c22746162223a31322c226d6574686f64223a22506167652e6a6176617363726970744469616c6f674f70656e696e67222c22706172616d73223a7b2274797065223a22636f6e6669726d222c226d657373616765223a226f6b3f227d7d"
+    },
+    {
+      "name": "evt_tab_opened",
+      "json": {
+        "v": 1,
+        "t": "evt",
+        "ev": "tab.opened",
+        "tab": 13,
+        "params": {
+          "opener": 12
+        }
+      },
+      "length": 67,
+      "hex": "430000007b2276223a312c2274223a22657674222c226576223a227461622e6f70656e6564222c22746162223a31332c22706172616d73223a7b226f70656e6572223a31327d7d"
+    },
+    {
+      "name": "host_hello",
+      "json": {
+        "v": 1,
+        "t": "host_hello",
+        "instance": "AAAAAAAAAAAAAAAAAAAAAA",
+        "ext": "0.1.0",
+        "file_access": true,
+        "host_pid": 4242
+      },
+      "length": 109,
+      "hex": "6d0000007b2276223a312c2274223a22686f73745f68656c6c6f222c22696e7374616e6365223a2241414141414141414141414141414141414141414141222c22657874223a22302e312e30222c2266696c655f616363657373223a747275652c22686f73745f706964223a343234327d"
+    },
+    {
+      "name": "driver_hello",
+      "json": {
+        "v": 1,
+        "t": "driver_hello",
+        "session": "s1",
+        "config": {
+          "upload_roots": [
+            "/home/user/Uploads/muse"
+          ]
+        }
+      },
+      "length": 95,
+      "hex": "5f0000007b2276223a312c2274223a226472697665725f68656c6c6f222c2273657373696f6e223a227331222c22636f6e666967223a7b2275706c6f61645f726f6f7473223a5b222f686f6d652f757365722f55706c6f6164732f6d757365225d7d7d"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "proto_mismatch",
+      "json": {
+        "v": 1,
+        "t": "hello",
+        "proto": 2,
+        "ext": "0.1.0",
+        "instance": "AAAAAAAAAAAAAAAAAAAAAA",
+        "file_access": true
+      },
+      "expect": "host: bye proto_mismatch, exit"
+    },
+    {
+      "name": "req_missing_id",
+      "json": {
+        "v": 1,
+        "t": "req",
+        "op": "ping"
+      },
+      "expect": "extension: res error bad_request"
+    },
+    {
+      "name": "unknown_type",
+      "json": {
+        "v": 1,
+        "t": "nope"
+      },
+      "expect": "bad_request"
+    },
+    {
+      "name": "wrong_envelope_version",
+      "json": {
+        "v": 2,
+        "t": "req",
+        "id": 1,
+        "op": "ping"
+      },
+      "expect": "bad_request"
+    },
+    {
+      "name": "truncated",
+      "hex": "0a0000007b2276223a31",
+      "expect": "decoder: incomplete frame, wait for more bytes; EOF here = read error"
+    },
+    {
+      "name": "oversize_to_chrome",
+      "length": 1048577,
+      "expect": "host: do not forward; evt host.error frame_too_large to driver"
+    }
+  ]
+}
